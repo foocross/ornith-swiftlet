@@ -56,8 +56,13 @@ was ~46% of decode wall time and fully idled the GPU. Fixed in
 `ExpertCache.buffers()` with bounded concurrent `pread` per miss batch
 (width via `SWIFTLET_EXPERT_READ_CONCURRENCY`, default 8) plus a thread-safe
 fd-open in `QpackExpertReader`; ~56% decode throughput improvement measured
-on the reference qpack, generated token IDs unchanged. Not yet re-verified
-against other cache budgets, longer contexts, or the iOS memory-pressure path.
+on the reference qpack, generated token IDs unchanged. A follow-up pass
+also fixed an O(slots) linear scan in the LFU eviction path (replaced with
+a min-heap) after correcting a measurement bug that had folded prefill's
+expert-cache stats into decode's; running total ~72% decode throughput
+improvement over the original baseline (see `CONVERSION_PLAN.md`, "Decode
+throughput"). Not yet re-verified against other cache budgets, longer
+contexts, or the iOS memory-pressure path.
 
 Swiftlet's current qpack repacker excludes MTP and vision weights. This kit is a
 text-only, baseline-K=8 port.

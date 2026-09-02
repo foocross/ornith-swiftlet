@@ -253,8 +253,12 @@ Above the floor, everything extra is expert cache:
   own design notes.~~ Traced and fixed (see `CONVERSION_PLAN.md`, "Decode
   throughput"): serial fill measured at ~46% of decode wall time, fully
   idling the GPU; bounded concurrent pread per miss batch took decode from
-  5.79 to 8.89 tok/s at `--cache-gb 2` with byte-identical output. Not yet
-  re-swept across other cache budgets or longer contexts.
+  5.79 to 8.89 tok/s at `--cache-gb 2` with byte-identical output. A
+  follow-up pass fixed a measurement bug (prefill's expert-cache stats had
+  been folded into decode's) and then a real O(slots) linear scan in LFU
+  eviction (now a min-heap), for a running total of ~9.98 tok/s (~72%
+  cumulative). Not yet re-swept across other cache budgets or longer
+  contexts.
 - The reported tok/s figures are from two short runs (80 and 200 tokens),
   not a proper sweep across cache budgets and prompt lengths -- directional,
   not a benchmark.

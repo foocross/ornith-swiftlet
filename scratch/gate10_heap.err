@@ -1,0 +1,8 @@
+loading tokenizer + model...
+prefill S3a: 21 tok wall=2.819s wait=1.420s/1071 cb=1071 err=0 dispatch=43052 lm=1 skip=20 gpu=1.055s/1071 timed/0 n/a
+prefill expert cache: 3730 hits / 2990 misses (56% hit rate), fill 1.161s of 2.819s prefill wall
+decode: 200 tokens in 20.0s (9.98 tok/s)
+decode Metal S3a: steps=200 cb=10200 err=0 wait=12.046s/10200 dispatch=410400 gpu=9.795s/10200 timed/0 n/a
+expert cache: 1213 slots (2.0 GB), 42626 hits / 28094 misses (60% hit rate) [cumulative, prefill+decode]
+decode expert cache: 38896 hits / 25104 misses (61% hit rate), fill 5.066s (0.202ms/miss avg, 25.191ms max), bookkeeping 0.119s of 20.0s decode wall
+decode loop overhead: argmax 0.031s, text-decode 0.024s of 20.0s decode wall

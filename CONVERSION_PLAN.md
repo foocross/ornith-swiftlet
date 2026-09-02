@@ -194,5 +194,64 @@ token IDs verified byte-identical to the width-1 baseline at every width --
 this changes fill scheduling only, not model output. Net: **~56% decode
 throughput improvement (5.79 -> 8.89 tok/s) with zero behavior change**, on
 top of the existing overlay/pipeline, at this cache budget and prompt length.
-Not yet swept across other cache budgets or longer runs (`design/BENCHMARK_PLAN.md`
-Gate 3/4 still call for that more broadly).
+
+### `--cache-gb` sweep: not a lever here
+
+Tried raising the cache budget (2/4/6/8 GB) expecting a further free win.
+Hit rate climbed a lot (60% -> 90%, misses 28,093 -> 7,060) but decode wall
+barely moved (22.9s -> 21.9s, within noise) -- GPU-side dispatch/scheduling
+overhead grew alongside the larger resident-buffer set (wait-minus-real-exec
+went from 2.76s to 4.83s), largely offsetting the fill-time savings. Kept
+the default at `--cache-gb 2`; this isn't a lever worth reaching for on this
+workload.
+
+### The fast-path fill/GPU-dispatch overlap that wasn't
+
+Reasoned (before reading the actual hot path) that fill and GPU dispatch
+could be pipelined per-expert for a further ~45%. Wrong: the real decode
+path is `QwenMetalModel.stepOneFast`/`encodePendingMoE`, not the
+`moeForward` function read first. It already defers layer N's MoE compute
+into layer N+1's command buffer -- a real pipelining optimization already
+in place. That closes off the overlap: layer N's expert picks come from a
+router GEMV inside layer N's own command buffer (so fill can't start before
+that buffer's `waitUntilCompleted` returns), and layer N+1's first op reads
+`hBuf`, which only gets a correct value from layer N's `weighted_accum` (a
+true data dependency, not just scheduling). The one independent piece --
+the shared expert's GEMV chain, which doesn't touch cache buffers -- is
+only ~1/8 the routed-experts' GPU cost per layer (`shared_expert_intermediate_size`
+== `moe_intermediate_size` == 512, `num_experts_per_tok` == 8), so
+overlapping just that would hide an estimated 1-2% of decode wall. Not
+worth the correctness risk of restructuring a barrier-synchronized,
+register-offset Metal kernel pipeline for that return. Left alone.
+
+### Measurement bug found and fixed, then a real 6% found and fixed
+
+The expert-cache stats line was cumulative for the process's whole
+lifetime, so the "fill" figures above for a `--chat` run actually included
+prefill's contribution, not just decode's. Fixed by snapshotting the cache
+counters right after prefill; corrected decode-only fill was ~5.1s of the
+above runs, not 7.1s (prefill alone: ~2,990 misses, ~1.2s). With that
+corrected, ~13% of decode wall was still unaccounted for. Ruled out the
+CLI's per-step argmax-over-vocab scan and full token-list re-decode
+(measured: 0.05s combined, negligible). Found a real cost inside
+`ExpertCache` itself: `slotForFill`'s LFU-eviction victim search was an
+O(slots) linear scan over every allocated slot (up to 1,213 at
+`--cache-gb 2`) on every miss once the cache filled -- 1.3s (6% of decode
+wall) over 25k+ decode misses. Fixed with a min-heap over `(freq, lastUse)`
+and lazy staleness checking on pop (a fresh candidate is pushed on every
+touch; a pop that no longer matches the slot's current freq/lastUse is
+just discarded, no per-touch removal bookkeeping needed), compacted
+periodically so a long-lived server process doesn't grow it unboundedly.
+Pure CPU/data-structure change, no Metal involved, and correctness doesn't
+depend on which slot an eviction picks (only hit rate/speed does) -- lower
+risk than the fast-path idea above by construction, not just in practice.
+Measured: bookkeeping 1.30s -> 0.12s (91% reduction); decode 21.6s -> 20.0s
+(9.27 -> 9.98 tok/s); output byte-identical across runs.
+
+**Running total: 5.79 -> 9.98 tok/s (~72% cumulative decode throughput
+improvement), `--cache-gb 2`, this qpack/prompt.** Not yet swept across
+other cache budgets or longer runs (`design/BENCHMARK_PLAN.md` Gate 3/4
+still call for that more broadly); ~13% of decode wall remains attributed
+only in aggregate (small per-layer CPU costs inside `stepOneFast` --
+attention-core softmax, per-layer router softmax, buffer/array copies --
+no single dominant piece found on this pass).
