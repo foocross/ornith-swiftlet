@@ -1,0 +1,14 @@
+$ swift-format lint --configuration .swift-format --recursive Sources Tests swiftlet-overlay/Sources swiftlet-overlay/Tests smoke
+Swift formatting: PASS
+
+$ sh -n scripts/*.sh swiftlet-overlay/scripts/*.sh
+Shell syntax: PASS
+
+$ python3 -m json.tool fixture and overlay asset
+JSON validation: PASS
+
+$ scripts/validate-patches.sh
+patch application: PASS
+
+$ swiftlet-overlay/scripts/install.sh fake-checkout; second install must fail
+installer copy/refuse-overwrite: PASS

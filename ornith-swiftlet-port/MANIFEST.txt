@@ -1,0 +1,73 @@
+Ornith 1.5 35B on Swiftlet - port kit manifest
+Generated: 2026-09-02
+
+Purpose
+-------
+A compile-tested Swift package and additive Swiftlet overlay for making the
+Ornith-1.5-35B-A3B text checkpoint explicit, validating its qpack container,
+and planning Swiftlet's global streamed-expert cache from a hard memory target.
+
+Validation included in this archive
+-----------------------------------
+- 27 standalone Swift tests passed on Swift 6.2.1 / x86_64 Linux.
+- 12 Swiftlet-overlay smoke tests passed against the reviewed upstream API surface.
+- Release build and inspection CLI passed.
+- Swift formatting, shell syntax, fixture JSON, patch application, and installer safety passed.
+
+Important scope boundary
+------------------------
+This is an integration overlay and reference implementation, not a claim of a
+completed production Metal port. It deliberately reuses Swiftlet's existing
+Qwen3.5 MoE/DeltaNet graph and qpack runtime. Full token/logit parity, Apple
+Metal compilation, real-checkpoint repacking, and throughput measurements must
+be run on Apple Silicon with the official checkpoint.
+
+Included files
+--------------
+.swift-format
+BUILD_AND_CLI_RESULTS.txt
+LICENSE
+OVERLAY_SMOKE_RESULTS.txt
+Package.swift
+README.md
+STATIC_VALIDATION_RESULTS.txt
+Sources/OrnithSwiftletPort/BinarySize.swift
+Sources/OrnithSwiftletPort/Compatibility.swift
+Sources/OrnithSwiftletPort/ExpertBlobLayout.swift
+Sources/OrnithSwiftletPort/ExpertCachePolicy.swift
+Sources/OrnithSwiftletPort/IntegrationPlan.swift
+Sources/OrnithSwiftletPort/MemoryGovernor.swift
+Sources/OrnithSwiftletPort/OrnithCheckpointConfig.swift
+Sources/OrnithSwiftletPort/OrnithProfile.swift
+Sources/OrnithSwiftletPort/PrefillPlanner.swift
+Sources/OrnithSwiftletPort/TopKRouter.swift
+Sources/ornith-port-inspect/main.swift
+TEST_RESULTS.txt
+THIRD_PARTY_NOTICES.md
+Tests/OrnithSwiftletPortTests/ExpertBlobLayoutTests.swift
+Tests/OrnithSwiftletPortTests/ExpertCachePolicyTests.swift
+Tests/OrnithSwiftletPortTests/Fixtures/ornith-1.5-35b-config.json
+Tests/OrnithSwiftletPortTests/MemoryGovernorTests.swift
+Tests/OrnithSwiftletPortTests/OrnithConfigTests.swift
+Tests/OrnithSwiftletPortTests/PrefillPlannerTests.swift
+Tests/OrnithSwiftletPortTests/TopKRouterTests.swift
+design/BENCHMARK_PLAN.md
+design/LIMITATIONS.md
+design/PORT_MAP.md
+design/UPSTREAM_SNAPSHOT.md
+scripts/cache-sweep.sh
+scripts/overlay-smoke-test.sh
+scripts/test.sh
+scripts/validate-patches.sh
+smoke/UpstreamAPIShims.swift
+swiftlet-overlay/README.md
+swiftlet-overlay/Sources/SwiftletCore/OrnithRuntimeFactory.swift
+swiftlet-overlay/Sources/SwiftletCore/OrnithSupport.swift
+swiftlet-overlay/Sources/SwiftletCore/SlotStreamMemoryGovernor.swift
+swiftlet-overlay/Tests/SwiftletCoreTests/OrnithSupportTests.swift
+swiftlet-overlay/assets/model-configs/ornith-1.5-35b-mlx4bit.json
+swiftlet-overlay/patches/0001-ornith-port-overlay.patch
+swiftlet-overlay/patches/0002-register-info-alias.patch
+swiftlet-overlay/scripts/install.sh
+MANIFEST.txt
+SOURCE_SHA256SUMS.txt

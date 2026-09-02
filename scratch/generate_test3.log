@@ -1,0 +1,12 @@
+loading tokenizer + model...
+prefill S3a: 23 tok wall=8.218s wait=3.449s/1173 cb=1173 err=0 dispatch=47152 lm=1 skip=22 gpu=2.678s/1173 timed/0 n/a
+[QwenMetalModel] descriptors ready; building fast path...
+[QwenMetalModel] fast path ready
+The question asks about why sparse Mixture-of-Experts (MoE) models can be streamed from SSD (Solid State Drives). This is a topic in efficient LLM inference, particularly related to work like DeepSeek-MoE, and the concept of "SSD-native" or "streaming" inference.
+
+Let me think about the key concepts here:
+
+**Background: MoEdecode: 80 tokens in 16.3s (4.92 tok/s)
+decode Metal S3a: steps=80 cb=4080 err=0 wait=7.792s/4080 dispatch=164160 gpu=6.031s/4080 timed/0 n/a
+expert cache: 1213 slots (2.0 GB), 18301 hits / 14659 misses (56% hit rate)
+

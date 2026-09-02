@@ -1,0 +1,107 @@
+$ swift test
+[0/1] Planning build
+Building for debugging...
+[0/5] Write sources
+[2/5] Write swift-version--1BA0962812E73E12.txt
+[4/7] Emitting module OrnithSwiftletPort
+[5/7] Compiling OrnithSwiftletPort MemoryGovernor.swift
+[6/15] Write Objects.LinkFileList
+[7/17] Linking ornith-port-inspect
+[9/17] Emitting module OrnithSwiftletPortTests
+[10/17] Compiling OrnithSwiftletPortTests OrnithConfigTests.swift
+[11/18] /mnt/data/ornith-swiftlet-port/.build/x86_64-unknown-linux-gnu/debug/OrnithSwiftletPortPackageDiscoveredTests.derived/all-discovered-tests.swift
+[12/19] Write sources
+[13/19] Wrapping AST for OrnithSwiftletPortTests for debugging
+[15/22] Compiling OrnithSwiftletPortPackageDiscoveredTests all-discovered-tests.swift
+[16/22] Emitting module OrnithSwiftletPortPackageDiscoveredTests
+[17/22] Compiling OrnithSwiftletPortPackageDiscoveredTests OrnithSwiftletPortTests.swift
+[18/23] /mnt/data/ornith-swiftlet-port/.build/x86_64-unknown-linux-gnu/debug/OrnithSwiftletPortPackageTests.derived/runner.swift
+[19/24] Write sources
+[20/24] Wrapping AST for OrnithSwiftletPortPackageDiscoveredTests for debugging
+[22/26] Emitting module OrnithSwiftletPortPackageTests
+[23/26] Compiling OrnithSwiftletPortPackageTests runner.swift
+[24/26] Write Objects.LinkFileList
+[25/26] Linking OrnithSwiftletPortPackageTests.xctest
+Build complete! (1.88s)
+Test Suite 'All tests' started at 2026-09-02 15:30:05.065
+Test Suite 'debug.xctest' started at 2026-09-02 15:30:05.066
+Test Suite 'ExpertBlobLayoutTests' started at 2026-09-02 15:30:05.066
+Test Case 'ExpertBlobLayoutTests.testOrnithInt4LayoutMatchesSwiftletQpackMath' started at 2026-09-02 15:30:05.066
+Test Case 'ExpertBlobLayoutTests.testOrnithInt4LayoutMatchesSwiftletQpackMath' passed (0.001 seconds)
+Test Case 'ExpertBlobLayoutTests.testPoolAndColdReadSizes' started at 2026-09-02 15:30:05.067
+Test Case 'ExpertBlobLayoutTests.testPoolAndColdReadSizes' passed (0.0 seconds)
+Test Case 'ExpertBlobLayoutTests.testProjectionOffsetsAreContiguous' started at 2026-09-02 15:30:05.067
+Test Case 'ExpertBlobLayoutTests.testProjectionOffsetsAreContiguous' passed (0.1 seconds)
+Test Suite 'ExpertBlobLayoutTests' passed at 2026-09-02 15:30:05.167
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.101 (0.101) seconds
+Test Suite 'ExpertCachePolicyTests' started at 2026-09-02 15:30:05.168
+Test Case 'ExpertCachePolicyTests.testBatchLargerThanCacheFailsBeforeMutation' started at 2026-09-02 15:30:05.168
+Test Case 'ExpertCachePolicyTests.testBatchLargerThanCacheFailsBeforeMutation' passed (0.0 seconds)
+Test Case 'ExpertCachePolicyTests.testCurrentBatchMembersAreProtectedFromEviction' started at 2026-09-02 15:30:05.168
+Test Case 'ExpertCachePolicyTests.testCurrentBatchMembersAreProtectedFromEviction' passed (0.0 seconds)
+Test Case 'ExpertCachePolicyTests.testDuplicateExpertInBatchReusesSlot' started at 2026-09-02 15:30:05.168
+Test Case 'ExpertCachePolicyTests.testDuplicateExpertInBatchReusesSlot' passed (0.0 seconds)
+Test Case 'ExpertCachePolicyTests.testLFUEvictsLessFrequentlyUsedExpert' started at 2026-09-02 15:30:05.169
+Test Case 'ExpertCachePolicyTests.testLFUEvictsLessFrequentlyUsedExpert' passed (0.0 seconds)
+Test Case 'ExpertCachePolicyTests.testRecencyBreaksFrequencyTie' started at 2026-09-02 15:30:05.169
+Test Case 'ExpertCachePolicyTests.testRecencyBreaksFrequencyTie' passed (0.0 seconds)
+Test Suite 'ExpertCachePolicyTests' passed at 2026-09-02 15:30:05.169
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'MemoryGovernorTests' started at 2026-09-02 15:30:05.169
+Test Case 'MemoryGovernorTests.testLongerContextReducesExpertCacheBudget' started at 2026-09-02 15:30:05.169
+Test Case 'MemoryGovernorTests.testLongerContextReducesExpertCacheBudget' passed (0.0 seconds)
+Test Case 'MemoryGovernorTests.testMoreMemoryProducesMoreExpertSlots' started at 2026-09-02 15:30:05.169
+Test Case 'MemoryGovernorTests.testMoreMemoryProducesMoreExpertSlots' passed (0.0 seconds)
+Test Case 'MemoryGovernorTests.testOrnithStateMath' started at 2026-09-02 15:30:05.169
+Test Case 'MemoryGovernorTests.testOrnithStateMath' passed (0.0 seconds)
+Test Case 'MemoryGovernorTests.testPlanStaysWithinHardBudgetAndUsesAlignedSlots' started at 2026-09-02 15:30:05.170
+Test Case 'MemoryGovernorTests.testPlanStaysWithinHardBudgetAndUsesAlignedSlots' passed (0.0 seconds)
+Test Case 'MemoryGovernorTests.testTooSmallBudgetFailsClearly' started at 2026-09-02 15:30:05.170
+Test Case 'MemoryGovernorTests.testTooSmallBudgetFailsClearly' passed (0.0 seconds)
+Test Suite 'MemoryGovernorTests' passed at 2026-09-02 15:30:05.170
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'OrnithConfigTests' started at 2026-09-02 15:30:05.170
+Test Case 'OrnithConfigTests.testLayerPatternHasThirtyLinearAndTenFullAttentionLayers' started at 2026-09-02 15:30:05.170
+Test Case 'OrnithConfigTests.testLayerPatternHasThirtyLinearAndTenFullAttentionLayers' passed (0.102 seconds)
+Test Case 'OrnithConfigTests.testMalformedQuantizationThrowsParseErrorInsteadOfTrapping' started at 2026-09-02 15:30:05.271
+Test Case 'OrnithConfigTests.testMalformedQuantizationThrowsParseErrorInsteadOfTrapping' passed (0.001 seconds)
+Test Case 'OrnithConfigTests.testMissingLayerTypesAreDerivedFromInterval' started at 2026-09-02 15:30:05.272
+Test Case 'OrnithConfigTests.testMissingLayerTypesAreDerivedFromInterval' passed (0.0 seconds)
+Test Case 'OrnithConfigTests.testOfficialGeometryParsesAsCompatible' started at 2026-09-02 15:30:05.273
+Test Case 'OrnithConfigTests.testOfficialGeometryParsesAsCompatible' passed (0.001 seconds)
+Test Case 'OrnithConfigTests.testOfficialQuantizationConfigKeyParsesDefaultExpertQuantization' started at 2026-09-02 15:30:05.274
+Test Case 'OrnithConfigTests.testOfficialQuantizationConfigKeyParsesDefaultExpertQuantization' passed (0.001 seconds)
+Test Case 'OrnithConfigTests.testShapeDriftIsRejected' started at 2026-09-02 15:30:05.274
+Test Case 'OrnithConfigTests.testShapeDriftIsRejected' passed (0.001 seconds)
+Test Suite 'OrnithConfigTests' passed at 2026-09-02 15:30:05.275
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.105 (0.105) seconds
+Test Suite 'PrefillPlannerTests' started at 2026-09-02 15:30:05.275
+Test Case 'PrefillPlannerTests.testPicksLargestCandidateWithinScratchBudget' started at 2026-09-02 15:30:05.275
+Test Case 'PrefillPlannerTests.testPicksLargestCandidateWithinScratchBudget' passed (0.0 seconds)
+Test Case 'PrefillPlannerTests.testRejectsBudgetBelowMinimumChunk' started at 2026-09-02 15:30:05.275
+Test Case 'PrefillPlannerTests.testRejectsBudgetBelowMinimumChunk' passed (0.0 seconds)
+Test Case 'PrefillPlannerTests.testSmallPromptUsesExactPromptSize' started at 2026-09-02 15:30:05.275
+Test Case 'PrefillPlannerTests.testSmallPromptUsesExactPromptSize' passed (0.1 seconds)
+Test Case 'PrefillPlannerTests.testZeroPromptNeedsNoScratch' started at 2026-09-02 15:30:05.376
+Test Case 'PrefillPlannerTests.testZeroPromptNeedsNoScratch' passed (0.0 seconds)
+Test Suite 'PrefillPlannerTests' passed at 2026-09-02 15:30:05.376
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.101 (0.101) seconds
+Test Suite 'TopKRouterTests' started at 2026-09-02 15:30:05.376
+Test Case 'TopKRouterTests.testInvalidRouterInputsFail' started at 2026-09-02 15:30:05.376
+Test Case 'TopKRouterTests.testInvalidRouterInputsFail' passed (0.0 seconds)
+Test Case 'TopKRouterTests.testSelectsTopKAndRenormalizesSelectedMass' started at 2026-09-02 15:30:05.376
+Test Case 'TopKRouterTests.testSelectsTopKAndRenormalizesSelectedMass' passed (0.0 seconds)
+Test Case 'TopKRouterTests.testTiesUseLowerExpertIndexDeterministically' started at 2026-09-02 15:30:05.377
+Test Case 'TopKRouterTests.testTiesUseLowerExpertIndexDeterministically' passed (0.0 seconds)
+Test Case 'TopKRouterTests.testUnnormalizedModePreservesRawSoftmaxMass' started at 2026-09-02 15:30:05.377
+Test Case 'TopKRouterTests.testUnnormalizedModePreservesRawSoftmaxMass' passed (0.0 seconds)
+Test Suite 'TopKRouterTests' passed at 2026-09-02 15:30:05.377
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'debug.xctest' passed at 2026-09-02 15:30:05.377
+	 Executed 27 tests, with 0 failures (0 unexpected) in 0.31 (0.31) seconds
+Test Suite 'All tests' passed at 2026-09-02 15:30:05.377
+	 Executed 27 tests, with 0 failures (0 unexpected) in 0.31 (0.31) seconds
+◇ Test run started.
+↳ Testing Library Version: 6.2.1 (c9d57c83568b06d)
+↳ Target Platform: x86_64-unknown-linux-gnu
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

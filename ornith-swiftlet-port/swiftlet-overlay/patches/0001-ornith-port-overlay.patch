@@ -1,0 +1,888 @@
+diff --git a/Sources/SwiftletCore/OrnithRuntimeFactory.swift b/Sources/SwiftletCore/OrnithRuntimeFactory.swift
+new file mode 100644
+index 0000000..af09562
+--- /dev/null
++++ b/Sources/SwiftletCore/OrnithRuntimeFactory.swift
+@@ -0,0 +1,139 @@
++import Foundation
++
++public struct OrnithRuntimeOptions: Sendable, Equatable {
++  public let targetMemoryGiB: Double
++  public let plannedContextTokens: Int
++  public let scratchBytes: Int64
++  public let safetyBytes: Int64
++  public let safetyFraction: Double
++
++  public init(
++    targetMemoryGiB: Double,
++    plannedContextTokens: Int,
++    scratchBytes: Int64 = 256 * 1_048_576,
++    safetyBytes: Int64 = 256 * 1_048_576,
++    safetyFraction: Double = 0.08
++  ) {
++    self.targetMemoryGiB = targetMemoryGiB
++    self.plannedContextTokens = plannedContextTokens
++    self.scratchBytes = scratchBytes
++    self.safetyBytes = safetyBytes
++    self.safetyFraction = safetyFraction
++  }
++}
++
++public struct OrnithRuntimeBuild {
++  public let model: QwenMetalModel
++  public let memoryPlan: ExpertCacheMemoryPlan
++}
++
++public enum OrnithRuntimeFactoryError: Error, CustomStringConvertible {
++  case notQpack(URL)
++  case missingDenseSize
++  case payloadSizeMismatch(path: String, expected: Int, actual: Int?)
++
++  public var description: String {
++    switch self {
++    case .notQpack(let url):
++      return "Ornith runtime requires a repacked .qpack directory: \(url.path)"
++    case .missingDenseSize:
++      return "manifest.json does not contain model.safetensors size"
++    case .payloadSizeMismatch(let path, let expected, let actual):
++      let actualDescription = actual.map(String.init) ?? "missing"
++      return
++        "qpack payload size mismatch for \(path): expected \(expected) B, got \(actualDescription)"
++    }
++  }
++}
++
++/// Concrete entry point for the port. It validates the checkpoint, reads the
++/// actual qpack expert stride and dense-file size, computes a hard memory plan,
++/// and passes only the resulting expert-cache budget to Swiftlet.
++public enum OrnithRuntimeFactory {
++  /// Runs every validation and memory-planning step without initializing Metal.
++  /// This is useful for CI, deployment checks, and unit tests with sparse files.
++  public static func preflight(
++    modelDir: URL,
++    options: OrnithRuntimeOptions
++  ) throws -> ExpertCacheMemoryPlan {
++    let configURL = modelDir.appendingPathComponent("config.json")
++    let layoutURL = modelDir.appendingPathComponent("packed_experts/layout.json")
++    let manifestURL = modelDir.appendingPathComponent("manifest.json")
++    guard FileManager.default.fileExists(atPath: layoutURL.path),
++      FileManager.default.fileExists(atPath: manifestURL.path)
++    else {
++      throw OrnithRuntimeFactoryError.notQpack(modelDir)
++    }
++
++    let config = try QwenConfig(url: configURL)
++    try config.requireOrnith1_5_35B()
++
++    let layout = try JSONDecoder().decode(
++      Qpack.Layout.self,
++      from: Data(contentsOf: layoutURL)
++    )
++    let manifest = try JSONDecoder().decode(
++      Qpack.Manifest.self,
++      from: Data(contentsOf: manifestURL)
++    )
++    try layout.requireOrnith1_5_35B(manifest: manifest)
++    guard let denseSize = manifest.files["model.safetensors"], denseSize > 0 else {
++      throw OrnithRuntimeFactoryError.missingDenseSize
++    }
++    try verifyPayloadFiles(
++      modelDir: modelDir,
++      manifest: manifest,
++      architecture: .ornith1_5_35B
++    )
++
++    return try ExpertCacheMemoryGovernor.plan(
++      architecture: .ornith1_5_35B,
++      targetMemoryGiB: options.targetMemoryGiB,
++      contextTokens: options.plannedContextTokens,
++      denseCoreBytes: Int64(denseSize),
++      expertStrideBytes: Int64(layout.expertStride),
++      scratchBytes: options.scratchBytes,
++      fixedSafetyBytes: options.safetyBytes,
++      safetyFraction: options.safetyFraction
++    )
++  }
++
++  public static func make(
++    modelDir: URL,
++    options: OrnithRuntimeOptions
++  ) throws -> OrnithRuntimeBuild {
++    let plan = try preflight(modelDir: modelDir, options: options)
++    let model = try QwenMetalModel(
++      modelDir: modelDir,
++      cacheBudgetGB: plan.cacheBudgetGiB
++    )
++    return OrnithRuntimeBuild(model: model, memoryPlan: plan)
++  }
++
++  private static func verifyPayloadFiles(
++    modelDir: URL,
++    manifest: Qpack.Manifest,
++    architecture: ArchConfig
++  ) throws {
++    let required =
++      ["model.safetensors"]
++      + (0..<architecture.layerCount).map { layer in
++        String(format: "packed_experts/layer_%02d.bin", layer)
++      }
++    let fileManager = FileManager.default
++
++    for relativePath in required {
++      guard let expected = manifest.files[relativePath] else { continue }
++      let url = modelDir.appendingPathComponent(relativePath)
++      let attributes = try? fileManager.attributesOfItem(atPath: url.path)
++      let actual = (attributes?[.size] as? NSNumber)?.intValue
++      guard actual == expected else {
++        throw OrnithRuntimeFactoryError.payloadSizeMismatch(
++          path: relativePath,
++          expected: expected,
++          actual: actual
++        )
++      }
++    }
++  }
++}
+diff --git a/Sources/SwiftletCore/OrnithSupport.swift b/Sources/SwiftletCore/OrnithSupport.swift
+new file mode 100644
+index 0000000..a7e723a
+--- /dev/null
++++ b/Sources/SwiftletCore/OrnithSupport.swift
+@@ -0,0 +1,258 @@
++import Foundation
++
++/// Explicit checkpoint profile for Ornith 1.5. The compute graph does not need
++/// a new implementation: Ornith uses the qwen3_5_moe family that Swiftlet
++/// already executes. This profile makes the accepted geometry reviewable and
++/// gives tests a stable target independent of Qwen3.6 naming.
++extension ArchConfig {
++  public static let ornith1_5_35B = ArchConfig(
++    family: .qwen3_5Moe,
++    name: "Ornith-1.5-35B-A3B",
++    repackSource: "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit",
++    hiddenSize: 2_048,
++    layerCount: 40,
++    fullAttentionInterval: 4,
++    vocabSize: 248_320,
++    tieWordEmbeddings: false,
++    rmsNormEps: 1e-6,
++    attnHeads: 16,
++    kvHeads: 2,
++    headDim: 256,
++    partialRotaryFactor: 0.25,
++    ropeTheta: 10_000_000,
++    maxPositionEmbeddings: 262_144,
++    linearVHeads: 32,
++    linearKHeads: 16,
++    linearKHeadDim: 128,
++    linearVHeadDim: 128,
++    convKernelSize: 4,
++    expertCount: 256,
++    expertTopK: 8,
++    moeIntermediateSize: 512,
++    sharedExpertIntermediateSize: 512,
++    normTopKProb: true
++  )
++}
++
++public struct OrnithConfigValidation: Sendable, Equatable {
++  public let mismatches: [String]
++  public var isCompatible: Bool { mismatches.isEmpty }
++}
++
++public struct OrnithConfigMismatchError: Error, Sendable, CustomStringConvertible {
++  public let mismatches: [String]
++  public var description: String {
++    "checkpoint is not Ornith-1.5-35B-A3B compatible:\n" + mismatches.joined(separator: "\n")
++  }
++}
++
++extension QwenConfig {
++  /// Validates every architecture field Swiftlet currently consumes. Fields
++  /// absent from QwenConfig (MTP count and explicit layer_types) are covered
++  /// by the standalone kit and should be added upstream before MTP support.
++  public func validateAsOrnith1_5_35B() -> OrnithConfigValidation {
++    let expected = ArchConfig.ornith1_5_35B
++    var mismatches: [String] = []
++
++    func check<T: Equatable>(_ field: String, _ actual: T, _ wanted: T) {
++      guard actual != wanted else { return }
++      mismatches.append("\(field): expected \(wanted), got \(actual)")
++    }
++
++    guard modelType.hasPrefix("qwen3_5_moe") else {
++      mismatches.append("model_type: expected qwen3_5_moe family, got \(modelType)")
++      return OrnithConfigValidation(mismatches: mismatches)
++    }
++
++    check("hidden_size", hiddenSize, expected.hiddenSize)
++    check("num_hidden_layers", numHiddenLayers, expected.layerCount)
++    check("num_attention_heads", numAttentionHeads, expected.attnHeads)
++    check("num_key_value_heads", numKeyValueHeads, expected.kvHeads)
++    check("head_dim", headDim, expected.headDim)
++    check("partial_rotary_factor", partialRotaryFactor, expected.partialRotaryFactor)
++    check("rope_theta", ropeTheta, expected.ropeTheta)
++    check("rms_norm_eps", rmsNormEps, expected.rmsNormEps)
++    check("vocab_size", vocabSize, expected.vocabSize)
++    check("tie_word_embeddings", tieWordEmbeddings, expected.tieWordEmbeddings)
++    check("full_attention_interval", fullAttentionInterval, expected.fullAttentionInterval)
++    check("linear_num_value_heads", linearNumValueHeads, expected.linearVHeads)
++    check("linear_num_key_heads", linearNumKeyHeads, expected.linearKHeads)
++    check("linear_key_head_dim", linearKeyHeadDim, expected.linearKHeadDim)
++    check("linear_value_head_dim", linearValueHeadDim, expected.linearVHeadDim)
++    check("linear_conv_kernel_dim", linearConvKernelDim, expected.convKernelSize)
++    check("num_experts", numExperts, expected.expertCount)
++    check("num_experts_per_tok", numExpertsPerTok, expected.expertTopK)
++    check("moe_intermediate_size", moeIntermediateSize, expected.moeIntermediateSize)
++    check(
++      "shared_expert_intermediate_size",
++      sharedExpertIntermediateSize,
++      expected.sharedExpertIntermediateSize
++    )
++    check("norm_topk_prob", normTopkProb, expected.normTopKProb)
++    check("weight prefix", weightPrefix, "language_model.")
++
++    switch deltaLayout {
++    case .split:
++      break
++    case .fusedInterleaved:
++      mismatches.append("DeltaNet projections: expected split qwen3_5 layout")
++    }
++
++    let linearCount = (0..<numHiddenLayers).filter(isLinearLayer).count
++    check("linear layer count", linearCount, expected.linearLayerCount)
++    check(
++      "full-attention layer count", numHiddenLayers - linearCount, expected.fullAttentionLayerCount)
++
++    return OrnithConfigValidation(mismatches: mismatches)
++  }
++
++  public func requireOrnith1_5_35B() throws {
++    let validation = validateAsOrnith1_5_35B()
++    guard validation.isCompatible else {
++      throw OrnithConfigMismatchError(mismatches: validation.mismatches)
++    }
++  }
++}
++
++public struct OrnithQpackValidation: Sendable, Equatable {
++  public let mismatches: [String]
++  public var isCompatible: Bool { mismatches.isEmpty }
++}
++
++public struct OrnithQpackMismatchError: Error, Sendable, CustomStringConvertible {
++  public let mismatches: [String]
++  public var description: String {
++    "qpack is not Ornith-1.5-35B-A3B MLX-int4 compatible:\n"
++      + mismatches.joined(separator: "\n")
++  }
++}
++
++extension Qpack.Layout {
++  /// Checks the streamable expert container, not just config.json. This
++  /// prevents a geometrically compatible config from opening a truncated,
++  /// differently quantized, or otherwise mismatched qpack.
++  public func validateAsOrnith1_5_35B(manifest: Qpack.Manifest) -> OrnithQpackValidation {
++    let architecture = ArchConfig.ornith1_5_35B
++    var mismatches: [String] = []
++
++    func check<T: Equatable>(_ field: String, _ actual: T, _ wanted: T) {
++      guard actual != wanted else { return }
++      mismatches.append("\(field): expected \(wanted), got \(actual)")
++    }
++
++    check("manifest.magic", manifest.magic, "QPACK")
++    check("manifest.version", manifest.version, Qpack.manifestVersion)
++    if !manifest.modelName.hasPrefix("qwen3_5_moe") {
++      mismatches.append(
++        "manifest.modelName: expected qwen3_5_moe family, got \(manifest.modelName)"
++      )
++    }
++    check("manifest.quantBits", manifest.quantBits, 4)
++    check("manifest.quantGroupSize", manifest.quantGroupSize, 64)
++
++    check("layout.expertCount", expertCount, architecture.expertCount)
++    check("layout.layerCount", layerCount, architecture.layerCount)
++    check(
++      "layout.expertStride",
++      expertStride,
++      architecture.expertBlobBytesInt4G64
++    )
++
++    let expectedLinearLayers = (0..<architecture.layerCount).map(architecture.isLinearLayer)
++    check("layout.linearLayers", linearLayers, expectedLinearLayers)
++
++    struct ExpectedSection {
++      let shape: [Int]
++      let offset: Int
++      let size: Int
++      let weight: Bool
++    }
++    let expectedSections: [String: ExpectedSection] = [
++      "gate_proj.weight": .init(shape: [512, 256], offset: 0, size: 524_288, weight: true),
++      "gate_proj.scales": .init(shape: [512, 32], offset: 524_288, size: 32_768, weight: false),
++      "gate_proj.biases": .init(shape: [512, 32], offset: 557_056, size: 32_768, weight: false),
++      "up_proj.weight": .init(shape: [512, 256], offset: 589_824, size: 524_288, weight: true),
++      "up_proj.scales": .init(shape: [512, 32], offset: 1_114_112, size: 32_768, weight: false),
++      "up_proj.biases": .init(shape: [512, 32], offset: 1_146_880, size: 32_768, weight: false),
++      "down_proj.weight": .init(
++        shape: [2_048, 64], offset: 1_179_648, size: 524_288, weight: true),
++      "down_proj.scales": .init(shape: [2_048, 8], offset: 1_703_936, size: 32_768, weight: false),
++      "down_proj.biases": .init(shape: [2_048, 8], offset: 1_736_704, size: 32_768, weight: false),
++    ]
++
++    var actualByName: [String: Qpack.Section] = [:]
++    for section in sections {
++      if actualByName.updateValue(section, forKey: section.name) != nil {
++        mismatches.append("layout.sections: duplicate section \(section.name)")
++      }
++      if section.offset < 0 || section.size <= 0 {
++        mismatches.append(
++          "layout.sections.\(section.name): invalid range offset=\(section.offset), size=\(section.size)"
++        )
++      } else if section.offset > expertStride - section.size {
++        mismatches.append(
++          "layout.sections.\(section.name): range exceeds expert stride"
++        )
++      }
++    }
++
++    let actualNames = Set(actualByName.keys)
++    let expectedNames = Set(expectedSections.keys)
++    for name in expectedNames.subtracting(actualNames).sorted() {
++      mismatches.append("layout.sections: missing \(name)")
++    }
++    for name in actualNames.subtracting(expectedNames).sorted() {
++      mismatches.append("layout.sections: unexpected \(name)")
++    }
++
++    for (name, expected) in expectedSections.sorted(by: { $0.key < $1.key }) {
++      guard let actual = actualByName[name] else { continue }
++      check("layout.sections.\(name).shape", actual.shape, expected.shape)
++      check("layout.sections.\(name).offset", actual.offset, expected.offset)
++      check("layout.sections.\(name).size", actual.size, expected.size)
++      if expected.weight {
++        check("layout.sections.\(name).dtype", actual.dtype, "U32")
++      } else if actual.dtype != "F16" && actual.dtype != "BF16" {
++        mismatches.append(
++          "layout.sections.\(name).dtype: expected F16 or BF16, got \(actual.dtype)"
++        )
++      }
++    }
++
++    let sortedSections = sections.sorted { lhs, rhs in
++      lhs.offset == rhs.offset ? lhs.name < rhs.name : lhs.offset < rhs.offset
++    }
++    for pair in zip(sortedSections, sortedSections.dropFirst()) {
++      let leftEnd = pair.0.offset + pair.0.size
++      if leftEnd > pair.1.offset {
++        mismatches.append(
++          "layout.sections: \(pair.0.name) overlaps \(pair.1.name)"
++        )
++      }
++    }
++
++    let expectedLayerBytes = architecture.expertCount * expertStride
++    for layer in 0..<architecture.layerCount {
++      let name = String(format: "packed_experts/layer_%02d.bin", layer)
++      guard let size = manifest.files[name] else {
++        mismatches.append("manifest.files: missing \(name)")
++        continue
++      }
++      check("manifest.files[\(name)]", size, expectedLayerBytes)
++    }
++
++    guard let denseSize = manifest.files["model.safetensors"], denseSize > 0 else {
++      mismatches.append("manifest.files: missing or empty model.safetensors")
++      return OrnithQpackValidation(mismatches: mismatches)
++    }
++
++    return OrnithQpackValidation(mismatches: mismatches)
++  }
++
++  public func requireOrnith1_5_35B(manifest: Qpack.Manifest) throws {
++    let validation = validateAsOrnith1_5_35B(manifest: manifest)
++    guard validation.isCompatible else {
++      throw OrnithQpackMismatchError(mismatches: validation.mismatches)
++    }
++  }
++}
+diff --git a/Sources/SwiftletCore/SlotStreamMemoryGovernor.swift b/Sources/SwiftletCore/SlotStreamMemoryGovernor.swift
+new file mode 100644
+index 0000000..2222f8d
+--- /dev/null
++++ b/Sources/SwiftletCore/SlotStreamMemoryGovernor.swift
+@@ -0,0 +1,137 @@
++import Foundation
++
++public struct ExpertCacheMemoryPlan: Sendable, Equatable {
++  public let targetBytes: Int64
++  public let denseCoreBytes: Int64
++  public let deltaRecurrenceBytes: Int64
++  public let deltaConvTailBytes: Int64
++  public let kvBytesPerToken: Int64
++  public let kvCacheBytes: Int64
++  public let scratchBytes: Int64
++  public let safetyBytes: Int64
++  public let expertCacheBytes: Int64
++  public let expertStrideBytes: Int64
++  public let expertSlots: Int
++  public let totalExpertSlots: Int
++  public let totalPlannedBytes: Int64
++
++  public var deltaStateBytes: Int64 {
++    deltaRecurrenceBytes + deltaConvTailBytes
++  }
++
++  public var cacheBudgetGiB: Double {
++    Double(expertCacheBytes) / Double(1 << 30)
++  }
++
++  public var expertCoverage: Double {
++    guard totalExpertSlots > 0 else { return 0 }
++    return Double(expertSlots) / Double(totalExpertSlots)
++  }
++}
++
++public enum ExpertCacheMemoryPlanError: Error, Sendable, Equatable, CustomStringConvertible {
++  case invalidInput(String)
++  case insufficientBudget(requiredBytes: Int64, targetBytes: Int64)
++
++  public var description: String {
++    switch self {
++    case .invalidInput(let message):
++      return message
++    case .insufficientBudget(let required, let target):
++      return "target memory \(target) B is below the minimum \(required) B"
++    }
++  }
++}
++
++extension ArchConfig {
++  /// Current Swiftlet uses `[Float]` for each session's K/V cache. Keep this
++  /// separate from `kvBytesPerToken`, which models a future FP16 cache.
++  public var swiftletDecodeKVBytesPerToken: Int {
++    fullAttentionLayerCount * kvHeads * headDim * 2 * MemoryLayout<Float>.stride
++  }
++
++  /// Fast-path GatedDelta convolution history uses one Float buffer per linear
++  /// layer with `(kernel - 1) * convDim` elements.
++  public var deltaNetConvTailBytes: Int {
++    let keyDimension = linearKHeads * linearKHeadDim
++    let valueDimension = linearVHeads * linearVHeadDim
++    let convolutionDimension = 2 * keyDimension + valueDimension
++    return linearLayerCount * max(0, convKernelSize - 1) * convolutionDimension
++      * MemoryLayout<Float>.stride
++  }
++}
++
++/// SlotStream-style hard-budget planner for Swiftlet's existing global cache.
++/// It reserves dense weights, the actual current FP32 session state, expected
++/// KV, scratch, and a safety margin before converting the remainder into whole
++/// expert slots.
++public enum ExpertCacheMemoryGovernor {
++  public static func plan(
++    architecture: ArchConfig,
++    targetMemoryGiB: Double,
++    contextTokens: Int,
++    denseCoreBytes: Int64,
++    expertStrideBytes: Int64,
++    scratchBytes: Int64 = 256 * 1_048_576,
++    fixedSafetyBytes: Int64 = 256 * 1_048_576,
++    safetyFraction: Double = 0.08,
++    minimumSlots: Int = 16
++  ) throws -> ExpertCacheMemoryPlan {
++    guard targetMemoryGiB.isFinite, targetMemoryGiB > 0 else {
++      throw ExpertCacheMemoryPlanError.invalidInput("targetMemoryGiB must be positive")
++    }
++    guard contextTokens >= 0 else {
++      throw ExpertCacheMemoryPlanError.invalidInput("contextTokens cannot be negative")
++    }
++    guard denseCoreBytes >= 0, expertStrideBytes > 0, scratchBytes >= 0,
++      fixedSafetyBytes >= 0, minimumSlots >= 16,
++      (0...0.5).contains(safetyFraction)
++    else {
++      throw ExpertCacheMemoryPlanError.invalidInput("invalid memory-planner input")
++    }
++
++    let targetBytes = Int64((targetMemoryGiB * Double(1 << 30)).rounded(.down))
++    let deltaRecurrenceBytes = Int64(architecture.deltaNetStateBytes)
++    let deltaConvTailBytes = Int64(architecture.deltaNetConvTailBytes)
++    let kvBytesPerToken = Int64(architecture.swiftletDecodeKVBytesPerToken)
++    let kvCacheBytes = kvBytesPerToken * Int64(contextTokens)
++    let percentageSafety = Int64((Double(targetBytes) * safetyFraction).rounded(.up))
++    let safetyBytes = max(fixedSafetyBytes, percentageSafety)
++
++    let residentWithoutExperts =
++      denseCoreBytes
++      + deltaRecurrenceBytes
++      + deltaConvTailBytes
++      + kvCacheBytes
++      + scratchBytes
++      + safetyBytes
++    let minimumRequired = residentWithoutExperts + Int64(minimumSlots) * expertStrideBytes
++    guard targetBytes >= minimumRequired else {
++      throw ExpertCacheMemoryPlanError.insufficientBudget(
++        requiredBytes: minimumRequired,
++        targetBytes: targetBytes
++      )
++    }
++
++    let totalExpertSlots = architecture.routedExpertTotal
++    let available = targetBytes - residentWithoutExperts
++    let slots = min(Int(available / expertStrideBytes), totalExpertSlots)
++    let expertCacheBytes = Int64(slots) * expertStrideBytes
++
++    return ExpertCacheMemoryPlan(
++      targetBytes: targetBytes,
++      denseCoreBytes: denseCoreBytes,
++      deltaRecurrenceBytes: deltaRecurrenceBytes,
++      deltaConvTailBytes: deltaConvTailBytes,
++      kvBytesPerToken: kvBytesPerToken,
++      kvCacheBytes: kvCacheBytes,
++      scratchBytes: scratchBytes,
++      safetyBytes: safetyBytes,
++      expertCacheBytes: expertCacheBytes,
++      expertStrideBytes: expertStrideBytes,
++      expertSlots: slots,
++      totalExpertSlots: totalExpertSlots,
++      totalPlannedBytes: residentWithoutExperts + expertCacheBytes
++    )
++  }
++}
+diff --git a/Tests/SwiftletCoreTests/OrnithSupportTests.swift b/Tests/SwiftletCoreTests/OrnithSupportTests.swift
+new file mode 100644
+index 0000000..e4790bc
+--- /dev/null
++++ b/Tests/SwiftletCoreTests/OrnithSupportTests.swift
+@@ -0,0 +1,274 @@
++import Foundation
++import Testing
++
++@testable import SwiftletCore
++
++@Suite struct OrnithSupportTests {
++  static func configURL(numExperts: Int = 256) throws -> URL {
++    let linear = [String](repeating: "linear_attention", count: 3)
++    let pattern = Array(repeating: linear + ["full_attention"], count: 10).flatMap { $0 }
++    let text: [String: Any] = [
++      "model_type": "qwen3_5_moe_text",
++      "hidden_size": 2_048,
++      "num_hidden_layers": 40,
++      "num_attention_heads": 16,
++      "num_key_value_heads": 2,
++      "head_dim": 256,
++      "full_attention_interval": 4,
++      "layer_types": pattern,
++      "linear_num_value_heads": 32,
++      "linear_num_key_heads": 16,
++      "linear_key_head_dim": 128,
++      "linear_value_head_dim": 128,
++      "linear_conv_kernel_dim": 4,
++      "num_experts": numExperts,
++      "num_experts_per_tok": 8,
++      "moe_intermediate_size": 512,
++      "shared_expert_intermediate_size": 512,
++      "mtp_num_hidden_layers": 1,
++      "vocab_size": 248_320,
++      "rms_norm_eps": 1e-6,
++      "tie_word_embeddings": false,
++      "rope_parameters": [
++        "rope_theta": 10_000_000,
++        "partial_rotary_factor": 0.25,
++      ],
++    ]
++    let top: [String: Any] = [
++      "model_type": "qwen3_5_moe",
++      "architectures": ["Qwen3_5MoeForConditionalGeneration"],
++      "text_config": text,
++      "tie_word_embeddings": false,
++    ]
++    let directory = FileManager.default.temporaryDirectory
++      .appendingPathComponent("ornith-config-\(UUID().uuidString)")
++    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++    let url = directory.appendingPathComponent("config.json")
++    try JSONSerialization.data(withJSONObject: top).write(to: url)
++    return url
++  }
++
++  static func qpack(
++    expertCount: Int = 256,
++    quantBits: Int? = 4,
++    omitLayer: Int? = nil
++  ) -> (Qpack.Layout, Qpack.Manifest) {
++    let sections = [
++      Qpack.Section(
++        name: "gate_proj.weight", dtype: "U32", shape: [512, 256], offset: 0, size: 524_288),
++      Qpack.Section(
++        name: "gate_proj.scales", dtype: "BF16", shape: [512, 32], offset: 524_288, size: 32_768),
++      Qpack.Section(
++        name: "gate_proj.biases", dtype: "BF16", shape: [512, 32], offset: 557_056, size: 32_768),
++      Qpack.Section(
++        name: "up_proj.weight", dtype: "U32", shape: [512, 256], offset: 589_824, size: 524_288),
++      Qpack.Section(
++        name: "up_proj.scales", dtype: "BF16", shape: [512, 32], offset: 1_114_112, size: 32_768),
++      Qpack.Section(
++        name: "up_proj.biases", dtype: "BF16", shape: [512, 32], offset: 1_146_880, size: 32_768),
++      Qpack.Section(
++        name: "down_proj.weight", dtype: "U32", shape: [2_048, 64], offset: 1_179_648, size: 524_288
++      ),
++      Qpack.Section(
++        name: "down_proj.scales", dtype: "BF16", shape: [2_048, 8], offset: 1_703_936, size: 32_768),
++      Qpack.Section(
++        name: "down_proj.biases", dtype: "BF16", shape: [2_048, 8], offset: 1_736_704, size: 32_768),
++    ]
++    let architecture = ArchConfig.ornith1_5_35B
++    let layout = Qpack.Layout(
++      expertCount: expertCount,
++      layerCount: architecture.layerCount,
++      expertStride: architecture.expertBlobBytesInt4G64,
++      sections: sections,
++      linearLayers: (0..<architecture.layerCount).map(architecture.isLinearLayer)
++    )
++    var files = ["model.safetensors": 1_350 * 1_048_576]
++    let layerBytes = architecture.expertCount * architecture.expertBlobBytesInt4G64
++    for layer in 0..<architecture.layerCount where layer != omitLayer {
++      files[String(format: "packed_experts/layer_%02d.bin", layer)] = layerBytes
++    }
++    let manifest = Qpack.Manifest(
++      magic: "QPACK",
++      version: Qpack.manifestVersion,
++      modelName: "qwen3_5_moe_text",
++      sourceCheckpoint: "Ornith-1.5-35B-A3B-MLX-4bit",
++      quantBits: quantBits,
++      quantGroupSize: 64,
++      files: files
++    )
++    return (layout, manifest)
++  }
++
++  static func writeSparseFile(_ url: URL, size: Int) throws {
++    _ = FileManager.default.createFile(atPath: url.path, contents: Data())
++    let handle = try FileHandle(forWritingTo: url)
++    try handle.truncate(atOffset: UInt64(size))
++    try handle.close()
++  }
++
++  static func qpackDirectory(corrupting relativePathToCorrupt: String? = nil) throws -> URL {
++    let directory = FileManager.default.temporaryDirectory
++      .appendingPathComponent("ornith-qpack-\(UUID().uuidString)")
++    let packed = directory.appendingPathComponent("packed_experts")
++    try FileManager.default.createDirectory(at: packed, withIntermediateDirectories: true)
++
++    let sourceConfig = try configURL()
++    defer {
++      try? FileManager.default.removeItem(at: sourceConfig.deletingLastPathComponent())
++    }
++    try Data(contentsOf: sourceConfig).write(to: directory.appendingPathComponent("config.json"))
++
++    let (layout, manifest) = qpack()
++    try JSONEncoder().encode(layout).write(to: packed.appendingPathComponent("layout.json"))
++    try JSONEncoder().encode(manifest).write(to: directory.appendingPathComponent("manifest.json"))
++
++    for (relativePath, declaredSize) in manifest.files {
++      let url = directory.appendingPathComponent(relativePath)
++      try FileManager.default.createDirectory(
++        at: url.deletingLastPathComponent(),
++        withIntermediateDirectories: true
++      )
++      let actualSize = relativePath == relativePathToCorrupt ? declaredSize - 1 : declaredSize
++      try writeSparseFile(url, size: actualSize)
++    }
++    return directory
++  }
++
++  @Test func explicitProfileMatchesOrnithGeometry() {
++    let profile = ArchConfig.ornith1_5_35B
++    #expect(profile.family == .qwen3_5Moe)
++    #expect(profile.linearLayerCount == 30)
++    #expect(profile.fullAttentionLayerCount == 10)
++    #expect(profile.expertCount == 256)
++    #expect(profile.expertTopK == 8)
++    #expect(profile.expertBlobBytesInt4G64 == 1_769_472)
++    #expect(profile.kvBytesPerToken == 20_480)
++    #expect(profile.swiftletDecodeKVBytesPerToken == 40_960)
++    #expect(profile.deltaNetStateBytes == 62_914_560)
++    #expect(profile.deltaNetConvTailBytes == 2_949_120)
++  }
++
++  @Test func officialConfigIsAccepted() throws {
++    let config = try QwenConfig(url: Self.configURL())
++    let validation = config.validateAsOrnith1_5_35B()
++    #expect(
++      validation.isCompatible, Comment(rawValue: validation.mismatches.joined(separator: "\n")))
++    #expect(config.normTopkProb)
++    #expect(config.weightPrefix == "language_model.")
++  }
++
++  @Test func shapeDriftIsRejected() throws {
++    let config = try QwenConfig(url: Self.configURL(numExperts: 128))
++    let validation = config.validateAsOrnith1_5_35B()
++    #expect(!validation.isCompatible)
++    #expect(validation.mismatches.contains { $0.contains("num_experts") })
++  }
++
++  @Test func validQpackLayoutIsAccepted() {
++    let (layout, manifest) = Self.qpack()
++    let validation = layout.validateAsOrnith1_5_35B(manifest: manifest)
++    #expect(
++      validation.isCompatible, Comment(rawValue: validation.mismatches.joined(separator: "\n")))
++  }
++
++  @Test func qpackQuantizationDriftIsRejected() {
++    let (layout, manifest) = Self.qpack(quantBits: 8)
++    let validation = layout.validateAsOrnith1_5_35B(manifest: manifest)
++    #expect(!validation.isCompatible)
++    #expect(validation.mismatches.contains { $0.contains("quantBits") })
++  }
++
++  @Test func incompleteQpackManifestIsRejected() {
++    let (layout, manifest) = Self.qpack(omitLayer: 39)
++    let validation = layout.validateAsOrnith1_5_35B(manifest: manifest)
++    #expect(!validation.isCompatible)
++    #expect(validation.mismatches.contains { $0.contains("layer_39.bin") })
++  }
++
++  @Test func memoryPlanRespectsTarget() throws {
++    let plan = try ExpertCacheMemoryGovernor.plan(
++      architecture: .ornith1_5_35B,
++      targetMemoryGiB: 4,
++      contextTokens: 8_192,
++      denseCoreBytes: 1_350 * 1_048_576,
++      expertStrideBytes: 1_769_472
++    )
++    #expect(plan.totalPlannedBytes <= plan.targetBytes)
++    #expect(plan.expertSlots >= 16)
++    #expect(plan.expertCacheBytes == Int64(plan.expertSlots) * 1_769_472)
++    #expect(plan.kvBytesPerToken == 40_960)
++    #expect(plan.deltaRecurrenceBytes == 62_914_560)
++    #expect(plan.deltaConvTailBytes == 2_949_120)
++  }
++
++  @Test func plannerRejectsCacheFloorBelowSwiftletMinimum() {
++    #expect(throws: ExpertCacheMemoryPlanError.self) {
++      try ExpertCacheMemoryGovernor.plan(
++        architecture: .ornith1_5_35B,
++        targetMemoryGiB: 4,
++        contextTokens: 8_192,
++        denseCoreBytes: 1_350 * 1_048_576,
++        expertStrideBytes: 1_769_472,
++        minimumSlots: 8
++      )
++    }
++  }
++
++  @Test func nonFiniteMemoryTargetIsRejected() {
++    #expect(throws: ExpertCacheMemoryPlanError.self) {
++      try ExpertCacheMemoryGovernor.plan(
++        architecture: .ornith1_5_35B,
++        targetMemoryGiB: .infinity,
++        contextTokens: 8_192,
++        denseCoreBytes: 1_350 * 1_048_576,
++        expertStrideBytes: 1_769_472
++      )
++    }
++  }
++
++  @Test func runtimePreflightValidatesPayloadsAndPlansCurrentState() throws {
++    let directory = try Self.qpackDirectory()
++    defer { try? FileManager.default.removeItem(at: directory) }
++
++    let plan = try OrnithRuntimeFactory.preflight(
++      modelDir: directory,
++      options: OrnithRuntimeOptions(targetMemoryGiB: 4, plannedContextTokens: 8_192)
++    )
++
++    #expect(plan.denseCoreBytes == 1_350 * 1_048_576)
++    #expect(plan.expertStrideBytes == 1_769_472)
++    #expect(plan.kvBytesPerToken == 40_960)
++    #expect(plan.totalPlannedBytes <= plan.targetBytes)
++  }
++
++  @Test func runtimePreflightRejectsWrongOnDiskPayloadSize() throws {
++    let badPath = "packed_experts/layer_07.bin"
++    let directory = try Self.qpackDirectory(corrupting: badPath)
++    defer { try? FileManager.default.removeItem(at: directory) }
++
++    #expect(throws: OrnithRuntimeFactoryError.self) {
++      try OrnithRuntimeFactory.preflight(
++        modelDir: directory,
++        options: OrnithRuntimeOptions(targetMemoryGiB: 4, plannedContextTokens: 8_192)
++      )
++    }
++  }
++
++  @Test func longerContextTradesCacheForKV() throws {
++    let short = try ExpertCacheMemoryGovernor.plan(
++      architecture: .ornith1_5_35B,
++      targetMemoryGiB: 4,
++      contextTokens: 4_096,
++      denseCoreBytes: 1_350 * 1_048_576,
++      expertStrideBytes: 1_769_472
++    )
++    let long = try ExpertCacheMemoryGovernor.plan(
++      architecture: .ornith1_5_35B,
++      targetMemoryGiB: 4,
++      contextTokens: 16_384,
++      denseCoreBytes: 1_350 * 1_048_576,
++      expertStrideBytes: 1_769_472
++    )
++    #expect(short.expertSlots > long.expertSlots)
++  }
++}
+diff --git a/assets/model-configs/ornith-1.5-35b-mlx4bit.json b/assets/model-configs/ornith-1.5-35b-mlx4bit.json
+new file mode 100644
+index 0000000..e4895ca
+--- /dev/null
++++ b/assets/model-configs/ornith-1.5-35b-mlx4bit.json
+@@ -0,0 +1,50 @@
++{
++  "architectures": ["Qwen3_5MoeForConditionalGeneration"],
++  "model_type": "qwen3_5_moe",
++  "hidden_size": 2048,
++  "text_config": {
++    "model_type": "qwen3_5_moe_text",
++    "hidden_size": 2048,
++    "num_hidden_layers": 40,
++    "num_attention_heads": 16,
++    "num_key_value_heads": 2,
++    "head_dim": 256,
++    "full_attention_interval": 4,
++    "layer_types": [
++      "linear_attention", "linear_attention", "linear_attention", "full_attention",
++      "linear_attention", "linear_attention", "linear_attention", "full_attention",
++      "linear_attention", "linear_attention", "linear_attention", "full_attention",
++      "linear_attention", "linear_attention", "linear_attention", "full_attention",
++      "linear_attention", "linear_attention", "linear_attention", "full_attention",
++      "linear_attention", "linear_attention", "linear_attention", "full_attention",
++      "linear_attention", "linear_attention", "linear_attention", "full_attention",
++      "linear_attention", "linear_attention", "linear_attention", "full_attention",
++      "linear_attention", "linear_attention", "linear_attention", "full_attention",
++      "linear_attention", "linear_attention", "linear_attention", "full_attention"
++    ],
++    "linear_num_value_heads": 32,
++    "linear_num_key_heads": 16,
++    "linear_key_head_dim": 128,
++    "linear_value_head_dim": 128,
++    "linear_conv_kernel_dim": 4,
++    "num_experts": 256,
++    "num_experts_per_tok": 8,
++    "moe_intermediate_size": 512,
++    "shared_expert_intermediate_size": 512,
++    "mtp_num_hidden_layers": 1,
++    "vocab_size": 248320,
++    "rms_norm_eps": 0.000001,
++    "tie_word_embeddings": false,
++    "partial_rotary_factor": 0.25,
++    "rope_parameters": {
++      "rope_theta": 10000000,
++      "partial_rotary_factor": 0.25,
++      "type": "default"
++    }
++  },
++  "tie_word_embeddings": false,
++  "quantization": {
++    "bits": 4,
++    "group_size": 64
++  }
++}

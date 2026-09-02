@@ -1,0 +1,39 @@
+opened downloads/Ornith-1.5-35B-A3B-CRACK-Q4_K_M.gguf: 753 tensors
+  wrote model-00001.safetensors: 44 tensors, 4.50 GB
+  processed 50/753 gguf tensors
+  wrote model-00002.safetensors: 52 tensors, 4.50 GB
+  processed 100/753 gguf tensors
+  wrote model-00003.safetensors: 48 tensors, 4.45 GB
+  processed 150/753 gguf tensors
+  wrote model-00004.safetensors: 46 tensors, 4.50 GB
+  processed 200/753 gguf tensors
+  wrote model-00005.safetensors: 52 tensors, 4.50 GB
+  processed 250/753 gguf tensors
+  wrote model-00006.safetensors: 44 tensors, 4.45 GB
+  processed 300/753 gguf tensors
+  wrote model-00007.safetensors: 50 tensors, 4.50 GB
+  processed 350/753 gguf tensors
+  wrote model-00008.safetensors: 52 tensors, 4.50 GB
+  processed 400/753 gguf tensors
+  wrote model-00009.safetensors: 48 tensors, 4.45 GB
+  processed 450/753 gguf tensors
+  wrote model-00010.safetensors: 43 tensors, 4.49 GB
+  processed 500/753 gguf tensors
+  wrote model-00011.safetensors: 59 tensors, 4.52 GB
+  processed 550/753 gguf tensors
+  wrote model-00012.safetensors: 37 tensors, 4.43 GB
+  processed 600/753 gguf tensors
+  wrote model-00013.safetensors: 50 tensors, 4.50 GB
+  processed 700/753 gguf tensors
+  wrote model-00014.safetensors: 59 tensors, 4.52 GB
+  wrote model-00015.safetensors: 37 tensors, 4.43 GB
+  processed 750/753 gguf tensors
+  wrote model-00016.safetensors: 12 tensors, 2.05 GB
+done: 733 tensors written, 20 MTP tensors skipped
+  copied config.json
+  copied tokenizer.json
+  copied tokenizer_config.json
+  copied vocab.json
+  copied merges.txt
+  copied chat_template.jinja
+wrote checkpoint to /Users/hoahoa/code/ai/orninth/scratch/hf-checkpoint

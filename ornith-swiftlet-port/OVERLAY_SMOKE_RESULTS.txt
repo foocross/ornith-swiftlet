@@ -1,0 +1,63 @@
+$ scripts/overlay-smoke-test.sh
+Building for debugging...
+[0/13] Write sources
+[2/13] Write swift-version--1BA0962812E73E12.txt
+[4/18] Emitting module SwiftletCore
+[5/18] Compiling SwiftletCore OrnithRuntimeFactory.swift
+[6/18] Compiling SwiftletCore SlotStreamMemoryGovernor.swift
+[7/18] Compiling SwiftletCore OrnithSupport.swift
+[8/18] Compiling SwiftletCore UpstreamAPIShims.swift
+[9/19] Wrapping AST for SwiftletCore for debugging
+[11/21] Compiling SwiftletCoreTests OrnithSupportTests.swift
+[12/21] Emitting module SwiftletCoreTests
+[13/22] /tmp/ornith-swiftlet-overlay-smoke/.build/x86_64-unknown-linux-gnu/debug/SwiftletOverlaySmokePackageDiscoveredTests.derived/all-discovered-tests.swift
+[14/22] Write sources
+[15/22] Wrapping AST for SwiftletCoreTests for debugging
+[17/25] Compiling SwiftletOverlaySmokePackageDiscoveredTests all-discovered-tests.swift
+[18/25] Compiling SwiftletOverlaySmokePackageDiscoveredTests SwiftletCoreTests.swift
+[19/25] Emitting module SwiftletOverlaySmokePackageDiscoveredTests
+[20/26] /tmp/ornith-swiftlet-overlay-smoke/.build/x86_64-unknown-linux-gnu/debug/SwiftletOverlaySmokePackageTests.derived/runner.swift
+[21/26] Write sources
+[22/26] Wrapping AST for SwiftletOverlaySmokePackageDiscoveredTests for debugging
+[24/28] Emitting module SwiftletOverlaySmokePackageTests
+[25/28] Compiling SwiftletOverlaySmokePackageTests runner.swift
+[26/29] Wrapping AST for SwiftletOverlaySmokePackageTests for debugging
+[27/29] Write Objects.LinkFileList
+[28/29] Linking SwiftletOverlaySmokePackageTests.xctest
+Build complete! (9.63s)
+Test Suite 'All tests' started at 2026-09-02 15:30:15.314
+Test Suite 'debug.xctest' started at 2026-09-02 15:30:15.316
+Test Suite 'debug.xctest' passed at 2026-09-02 15:30:15.316
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.0 (0.0) seconds
+Test Suite 'All tests' passed at 2026-09-02 15:30:15.316
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.0 (0.0) seconds
+◇ Test run started.
+↳ Testing Library Version: 6.2.1 (c9d57c83568b06d)
+↳ Target Platform: x86_64-unknown-linux-gnu
+◇ Suite OrnithSupportTests started.
+◇ Test qpackQuantizationDriftIsRejected() started.
+◇ Test shapeDriftIsRejected() started.
+◇ Test runtimePreflightRejectsWrongOnDiskPayloadSize() started.
+◇ Test officialConfigIsAccepted() started.
+◇ Test incompleteQpackManifestIsRejected() started.
+◇ Test nonFiniteMemoryTargetIsRejected() started.
+◇ Test plannerRejectsCacheFloorBelowSwiftletMinimum() started.
+◇ Test validQpackLayoutIsAccepted() started.
+◇ Test runtimePreflightValidatesPayloadsAndPlansCurrentState() started.
+◇ Test explicitProfileMatchesOrnithGeometry() started.
+◇ Test longerContextTradesCacheForKV() started.
+◇ Test memoryPlanRespectsTarget() started.
+✔ Test validQpackLayoutIsAccepted() passed after 0.001 seconds.
+✔ Test nonFiniteMemoryTargetIsRejected() passed after 0.001 seconds.
+✔ Test longerContextTradesCacheForKV() passed after 0.001 seconds.
+✔ Test explicitProfileMatchesOrnithGeometry() passed after 0.001 seconds.
+✔ Test plannerRejectsCacheFloorBelowSwiftletMinimum() passed after 0.001 seconds.
+✔ Test incompleteQpackManifestIsRejected() passed after 0.001 seconds.
+✔ Test memoryPlanRespectsTarget() passed after 0.001 seconds.
+✔ Test qpackQuantizationDriftIsRejected() passed after 0.001 seconds.
+✔ Test officialConfigIsAccepted() passed after 0.002 seconds.
+✔ Test shapeDriftIsRejected() passed after 0.002 seconds.
+✔ Test runtimePreflightValidatesPayloadsAndPlansCurrentState() passed after 0.010 seconds.
+✔ Test runtimePreflightRejectsWrongOnDiskPayloadSize() passed after 0.014 seconds.
+✔ Suite OrnithSupportTests passed after 0.014 seconds.
+✔ Test run with 12 tests in 1 suite passed after 0.014 seconds.

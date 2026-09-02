@@ -1,0 +1,23 @@
+# Swiftlet is its own git clone (github.com/leonickson1/Swiftlet), tracked
+# independently there — not nested inside this repo.
+/Swiftlet/
+
+# Swift build artifacts
+.build/
+.swiftpm/
+
+# Large/derived scratch outputs — not source, not needed to reproduce the
+# result (see synopsis.md "What's kept, what's reusable"): the GGUF/HF/mlx
+# intermediates and the final qpack are all multi-GB and regenerable from
+# scratch/build_hf_checkpoint.py plus the documented mlx_lm/swiftlet-repack
+# commands. Benchmark logs and small diagnostic JSON are kept.
+scratch/*.qpack
+scratch/*.gguf
+scratch/downloads/
+scratch/ref/
+
+# Claude Code local session settings (machine-specific, not shared config)
+.claude/settings.local.json
+
+# macOS
+.DS_Store

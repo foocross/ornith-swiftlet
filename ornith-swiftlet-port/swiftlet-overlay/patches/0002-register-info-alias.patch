@@ -1,0 +1,12 @@
+diff --git a/Sources/SwiftletCore/ArchConfig.swift b/Sources/SwiftletCore/ArchConfig.swift
+index 6a3d6e0..e89881d 100644
+--- a/Sources/SwiftletCore/ArchConfig.swift
++++ b/Sources/SwiftletCore/ArchConfig.swift
+@@ -156,6 +156,7 @@ public struct ArchConfig: Sendable, Equatable {
+     public static let known: [String: ArchConfig] = [
+         "qwen3-next-80b": .qwen3Next80B,
+         "qwen3.5-397b": .qwen3_5_397B,
+         "qwen3.6-35b": .qwen3_6_35B,
++        "ornith-1.5-35b": .ornith1_5_35B,
+     ]
+ }
