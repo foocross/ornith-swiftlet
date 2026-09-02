@@ -313,3 +313,69 @@ the low end of "double-digit-percent" rather than the high end.
 
 **Running total after this: ~9.4 -> ~9.9 tok/s from this change (+5-6%),
 compounding onto the 5.79 -> ~9.4 baseline above.**
+
+### CPU attention-core vectorization: real win, grows with context length
+
+With MoE fusion landed, a code review looking for the next lever (not a new
+GPU trace -- see the caveat below) noticed `attnCoreCPU`
+(`QwenMetalModel.swift`, the decode-fast-path attention core) and its
+sibling `attnForward` (the non-fast-path fallback, same computation) do
+QK^T and softmax-weighted-V-sum as hand-written scalar Swift loops --
+`O(H * kvLen * hd)` per full-attention layer per decode step -- despite
+`QwenCPUModel.swift` having `import Accelerate` at the top of the file,
+unused for this path. Same for `rmsNorm`/`softmaxRow` in
+`QwenCPUModel.swift`, which this code also calls.
+
+Why this matters specifically for *this* model: `layer_types` in the
+qpack's `config.json` has `full_attention_interval: 4`, so 10 of the 40
+layers hit this loop, at `num_attention_heads=16`, `head_dim=256`. Every
+other decode-time cost this arc has measured (MoE, dense projections,
+lm_head, expert-cache fill) is `O(1)` in context length -- this is the one
+piece that grows with it, and it runs entirely on CPU while the GPU sits
+idle (between `commitAndWait` and the next command buffer), so none of it
+shows up in the per-category GPU-timestamp breakdown above. It was cheap
+enough at the 200-token runs benchmarked so far to hide inside "negligible"
+loop overhead; it isn't a fixed cost, so it doesn't stay negligible.
+
+Fix: replaced the scalar loops with `cblas_sgemv` (one BLAS call for QK^T,
+one for the softmax-weighted V-sum, per head -- `kAll`/`vAll`'s
+`[pos][kvHead][headDim]` layout is exactly a row-major `(kvLen x hd)` matrix
+with row stride `KVH*hd`, which `cblas_sgemv`'s `lda` expresses directly,
+no repacking needed) and `rmsNorm`/`softmaxRow` with `vDSP` (`vDSP_svesq`/
+`vDSP_vsmul`/`vDSP_vmul`; `vDSP_maxv`/`vDSP_vsadd`/`vvexpf`/`vDSP_sve`/
+`vDSP_vsmul`). Both `attnCoreCPU` and `attnForward` fixed identically (the
+non-fast-path is a straight fallback, `SWIFTLET_NO_FAST_GEMV=1`, worth
+keeping consistent).
+
+**One deliberate exception to this project's byte-identical-output bar**:
+Accelerate's vectorized reductions sum in a different (tree-style) order
+than the sequential scalar loops did, so output is *numerically
+equivalent*, not bit-identical, to pre-change runs. Verified instead
+against the existing test-suite tolerances built for exactly this kind of
+float-reordering difference (`FixtureForwardTests`/`IncrementalDecodeTests`
+`maxAbsDiff` bounds, already up to `2e-3` on quantized logits) plus full
+`swift test` (63/63 green) -- and, in practice, the real full-model runs
+below produced **byte-identical generated text** (not just "close") to the
+pre-change baseline, greedy decoding included; the difference only shows up
+in timing/instruction-count stats, not in a single output token.
+
+Measured, `--cache-gb 2`, same reference qpack/prompt, paired runs
+(`/tmp/swiftlet-old` = pre-change binary via `git stash`, `/tmp/swiftlet-new`
+= this change) on this machine:
+
+| Run | Old | New | Delta | Note |
+|---|---|---|---|---|
+| 200 tokens (reference prompt) | 9.85 tok/s | 10.27 tok/s | +4.3% | matches `moefusion_batched.out` exactly except stats lines |
+| 354 tokens (same prompt, model ran to EOS under `--max-new 1500`) | 9.98 tok/s | 11.12 tok/s | **+11.4%** | user-mode CPU time 7.48s -> 4.73s (-37%), vs. -22% at 200 tokens |
+
+The win grows with context length as predicted -- not a full longer-context
+sweep (that's still `BENCHMARK_PLAN.md`'s open item, and this was one paired
+comparison, not several), but real, directional evidence for the specific
+mechanism identified: this is the one decode-time cost in the whole arc
+that's `O(context length)` rather than `O(1)`, so it's expected to matter
+increasingly more, not less, at the 32K-token context `synopsis.md`'s
+memory math targets.
+
+**Running total after this: ~9.9 -> ~10.3-11.1 tok/s depending on context
+length so far reached in a run (larger win at longer context), compounding
+onto the 5.79 -> ~9.9 baseline above.**

@@ -8,12 +8,15 @@ to do next.
 
 ## Where things stand right now
 
-**Decode throughput: 5.79 -> ~9.4-9.94 tok/s from the fill/eviction arc, plus
-a further +5-6% from MoE kernel fusion on top of that (`--cache-gb 2`, same
+**Decode throughput: 5.79 -> ~9.4-9.94 tok/s from the fill/eviction arc,
++5-6% from MoE kernel fusion, plus a further +4-11% (grows with context
+length) from vectorizing the CPU attention core (`--cache-gb 2`, same
 reference qpack/prompt throughout).** Run-to-run variance on this machine is
 real (thermal/load noise) -- treat anything in that range as "current
 state," not a single precise number. All changes verified byte-identical
-generated output against the pre-change baseline at every step; all 63
+generated output against the pre-change baseline at every step (one
+deliberate exception: the CPU-vectorization change is numerically
+equivalent, not bit-identical, in intermediate floats -- see below); all 63
 Swiftlet tests (62 + 1 new) + 27 standalone `ornith-swiftlet-port` tests
 still pass.
 
@@ -29,12 +32,26 @@ count suggested (+5-6% decode tok/s, not the higher end of the "double-digit"
 estimate this file floated) -- most of decode's GPU time turned out to be
 real compute, not per-dispatch overhead.
 
+**New this session: CPU attention-core vectorization**, found by reviewing
+this file + `synopsis.md` for the next lever rather than a new GPU trace.
+`attnCoreCPU`/`attnForward` (`QwenMetalModel.swift`) and `rmsNorm`/
+`softmaxRow` (`QwenCPUModel.swift`) were scalar Swift loops despite
+`import Accelerate` sitting unused in the latter file; replaced with
+`cblas_sgemv`/`vDSP` calls. See `CONVERSION_PLAN.md` "CPU attention-core
+vectorization" for full detail -- short version: this is the one decode-time
+cost in the whole arc that's `O(context length)` rather than `O(1)` (10 of
+40 layers are full-attention, cost is `O(H*kvLen*hd)` per such layer per
+step), so unlike everything else measured so far it's expected to matter
+increasingly more at longer contexts, not stay fixed. Measured +4.3% at 200
+tokens, +11.4% at 354 tokens (one paired comparison each, not a full sweep)
+-- consistent with that growth prediction.
+
 ## Repo/commit state -- nothing pushed anywhere
 
 Two separate local git repos, both untouched on origin:
 
 - **`Swiftlet/`** (clone of `github.com/leonickson1/Swiftlet`, origin
-  `main` at `aaa910a`): branch **`ornith-decode-throughput`**, four commits
+  `main` at `aaa910a`): branch **`ornith-decode-throughput`**, six commits
   on top:
   1. `6d14f41` -- applies the pre-existing `ornith-swiftlet-port` overlay
      (was sitting as uncommitted working-tree changes before this session;
@@ -44,6 +61,9 @@ Two separate local git repos, both untouched on origin:
      been folded into decode's) + heap-based LFU eviction (+7% more)
   4. `14df4ea` -- opt-in per-category GPU timing diagnostic
      (`SWIFTLET_CATEGORY_TIMING=1`), off by default
+  5. `336bdbf` -- MoE kernel fusion: batched bindless GEMV, +5-6% further
+  6. `6f20f28` -- CPU attention-core vectorization (`cblas_sgemv`/`vDSP`),
+     +4-11% depending on context length reached so far (grows with it)
 - **`orninth/`** (this root project, freshly `git init`'d this session):
   branch `main`, two commits (`c931068` initial, `8fe969d` docs + logs).
   `.gitignore` excludes `Swiftlet/` (tracked separately above), `.build/`,
@@ -199,6 +219,15 @@ and it's cheap enough that skipping it isn't worth it.
   batching on). A/B-debugging escape hatch, same shape as
   `SWIFTLET_NO_FAST_GEMV`.
 
+The CPU attention-core vectorization has no on/off flag (unlike the levers
+above) -- it's a straight numeric-equivalence swap of the reduction
+implementation, not a behavioral change worth A/B-gating. Its own
+verification runs are `scratch/vdsp_attn_run1.out` (200 tokens, vs.
+`moefusion_batched.out`) and `scratch/longctx_old.out`/`longctx_new.out`
+(354 tokens, pre-/post-change binaries via `git stash`) -- same
+byte-for-byte generated-text diff method as everything else in this list,
+just without a flag to toggle in one binary.
+
 ## Key files
 
 - `Swiftlet/Sources/SwiftletCore/ExpertCache.swift` -- concurrent fill +
@@ -211,6 +240,12 @@ and it's cheap enough that skipping it isn't worth it.
   runs). Category-timing diagnostic, `drainPendingMoE` helper, and the
   MoE-fusion wiring (`moeBatchEligible`, `moeExpertBases`, the batched
   gate+up/down dispatches in `encodePendingMoE`) all live here.
+  `attnCoreCPU`/`attnForward` are the vectorized (`cblas_sgemv`) attention
+  cores -- the fast-path and fallback versions of the same computation.
+- `Swiftlet/Sources/SwiftletCore/QwenCPUModel.swift` -- `rmsNorm`/
+  `softmaxRow`, now `vDSP`-backed; this file is otherwise the CPU
+  correctness oracle, deliberately left simple elsewhere ("favors clarity
+  over speed" per its own doc comment).
 - `Swiftlet/Sources/SwiftletCore/MetalEngine.swift` -- `gemv_moe_batched`'s
   Swift-side encode helper (`encodeGemvMoEBatched`) and blocking test
   wrapper (`gemvMoEBatchedBlocking`).

@@ -263,7 +263,7 @@ Above the floor, everything extra is expert cache:
   not a proper sweep across cache budgets and prompt lengths -- directional,
   not a benchmark.
 
-## Status as of 2026-09-02: decode-throughput optimization, MoE fusion landed
+## Status as of 2026-09-02: decode-throughput optimization, MoE fusion + CPU vectorization landed
 
 **See `handoff.md` for the full handoff to continue this** -- exact repo/
 commit state (two local git repos, `Swiftlet/` and this root, nothing
@@ -272,14 +272,24 @@ throughput went from 5.79 to ~9.4-9.94 tok/s (`--cache-gb 2`, same reference
 qpack/prompt) across three real fixes (concurrent expert-cache fill,
 corrected a measurement bug, heap-based LFU eviction), then a further +5-6%
 from MoE kernel fusion (a new bindless batched-GEMV Metal kernel collapsing
-`encodePendingMoE`'s up to 38 per-MoE-layer dispatches down to 9) -- all
-verified byte-identical output at every step. A cache-budget sweep and a
-fill/GPU-dispatch overlap idea were both investigated and rejected with real
-evidence (see `CONVERSION_PLAN.md` "Decode throughput" for the numbers on
-both); MoE fusion was investigated, pursued, and landed (see
-`CONVERSION_PLAN.md` "MoE kernel fusion" and `handoff.md`) -- a real win,
-smaller than the ~2x total-dispatch-count reduction suggested, since most of
-decode's GPU time turned out to be real compute rather than per-dispatch
-overhead. No further work is planned in this specific arc; the cache-budget
-and longer-context sweeps `design/BENCHMARK_PLAN.md` calls for remain open,
-unrelated to and unaffected by the fusion work.
+`encodePendingMoE`'s up to 38 per-MoE-layer dispatches down to 9), then a
+further +4.3% (200 tokens) to +11.4% (354 tokens) from vectorizing the CPU
+attention core (`cblas_sgemv`/`vDSP` replacing scalar Swift loops) -- all
+verified byte-identical output at every step except the last, which is
+numerically equivalent (not bit-identical, due to Accelerate's different
+float-reduction order) but produced byte-identical *generated text* in
+practice on both paired runs. A cache-budget sweep and a fill/GPU-dispatch
+overlap idea were both investigated and rejected with real evidence (see
+`CONVERSION_PLAN.md` "Decode throughput" for the numbers on both); MoE
+fusion was investigated, pursued, and landed (see `CONVERSION_PLAN.md` "MoE
+kernel fusion" and `handoff.md`) -- a real win, smaller than the ~2x
+total-dispatch-count reduction suggested, since most of decode's GPU time
+turned out to be real compute rather than per-dispatch overhead. The CPU
+attention-core vectorization (see `CONVERSION_PLAN.md` "CPU attention-core
+vectorization") is the one fix in this whole arc that targets a cost which
+scales with context length rather than staying fixed -- it's expected to
+matter more, not less, at the longer contexts this project hasn't yet
+benchmarked. The cache-budget and longer-context sweeps
+`design/BENCHMARK_PLAN.md` calls for remain open; the longer-context sweep
+in particular is now the natural next step to get real numbers on that
+growth curve rather than the two-point comparison done so far.

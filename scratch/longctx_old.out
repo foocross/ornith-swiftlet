@@ -1,0 +1,44 @@
+loading tokenizer + model...
+prefill S3a: 21 tok wall=2.872s wait=1.391s/1071 cb=1071 err=0 dispatch=18692 lm=1 skip=20 gpu=0.985s/1071 timed/0 n/a
+prefill expert cache: 3730 hits / 2990 misses (56% hit rate), fill 1.239s of 2.872s prefill wall
+[QwenMetalModel] descriptors ready; building fast path...
+[QwenMetalModel] fast path ready
+The user wants a short paragraph about the history of the Netherlands. Let me write a concise but informative paragraph covering the key points of Dutch history.
+
+Key points to include:
+- Early history (Germanic tribes, Roman influence)
+- Formation of the Netherlands
+- The Golden Age (17th century) - maritime power, trade, VOC
+- Spanish rule and independence (Eighty Years' War)
+- Colonial empire
+- Modern era
+
+Let me write a well-structured short paragraph.
+</think>
+
+# The History of the Netherlands
+
+The Netherlands has a rich and storied history that stretches back over two thousand years, when the region was inhabited by Germanic tribes and later came under Roman influence. During the Middle Ages, these low-lying lands were a patchwork of counties and duchies, gradually reclaimed from the sea through an ingenious system of dikes, canals, and windmills that defined the Dutch relationship with water. The modern nation emerged in 1581 when the seven provinces declared independence from Spanish rule, launching the Eighty Years' War. The following century, known as the **Dutch Golden Age** (roughly 1600–1672), transformed the country into a global powerhouse of trade, art, and science. The establishment of the Dutch East India Company (VOC) in 1602—the world's first joint-stock company—spurred an extensive colonial empire spanning the Americas, Africa, and Asia. Though its global dominance waned in the 18th century, the Netherlands emerged as a prosperous, influential nation in the modern era, renowned for its democratic traditions, innovative agriculture, and enduring contributions to art, science, and global commerce.decode: 354 tokens in 35.5s (9.98 tok/s)
+decode Metal S3a: steps=354 cb=18054 err=0 wait=20.219s/18054 dispatch=315768 gpu=15.796s/18054 timed/0 n/a
+expert cache: 1213 slots (2.0 GB), 74649 hits / 45351 misses (62% hit rate) [cumulative, prefill+decode]
+decode expert cache: 70919 hits / 42361 misses (63% hit rate), fill 8.931s (0.211ms/miss avg, 25.542ms max), bookkeeping 0.202s of 35.5s decode wall
+decode loop overhead: argmax 0.058s, text-decode 0.071s of 35.5s decode wall
+
+       39.89 real         7.48 user        15.70 sys
+          5158944768  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              392272  page reclaims
+                  29  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               10213  voluntary context switches
+              176841  involuntary context switches
+        135794276097  instructions retired
+         77854145251  cycles elapsed
+          3789197560  peak memory footprint
