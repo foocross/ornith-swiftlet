@@ -255,3 +255,61 @@ still call for that more broadly); ~13% of decode wall remains attributed
 only in aggregate (small per-layer CPU costs inside `stepOneFast` --
 attention-core softmax, per-layer router softmax, buffer/array copies --
 no single dominant piece found on this pass).
+
+### MoE kernel fusion: real win, smaller than the dispatch-count drop suggested
+
+`handoff.md` left "pursue MoE kernel fusion" as an open decision after the
+real per-category GPU timestamps pointed at MoE (46.3% of decode wall,
++18% over its byte-budget prediction) as the most dispatch-heavy, least
+efficient category. Picked up and pursued: `encodePendingMoE`
+(`QwenMetalModel.swift`) issued up to 38 separate GPU dispatches per MoE
+layer for K=8 routed experts (8 gate + 8 up + 3 shared GEMVs, 8 per-expert
+`silu_mul` + 1 shared, 8 down + 1 shared-down, 1 `weighted_accum`).
+
+Two changes, landed together, gated by `SWIFTLET_NO_MOE_BATCH=1` (forces the
+original per-expert loop, mirrors `SWIFTLET_NO_FAST_GEMV`'s A/B shape):
+
+1. **Batched `silu_mul` (unconditional, not gated)**: routed experts' gate/up
+   outputs are already laid out contiguously by expert index in `sBuf`, so
+   the 8 per-expert `silu_mul` dispatches collapse into 1 over `K*inter`
+   elements -- same computation, pure dispatch-count reduction.
+2. **New Metal kernel `gemv_moe_batched`** (bindless -- first use of this
+   pattern in the codebase): fuses gate+up into one dispatch across all K
+   resident experts, and does the same for down, via a tiny per-layer buffer
+   of the K experts' raw GPU addresses (`MTLBuffer.gpuAddress`) plus
+   `enc.useResource` for residency. Every expert's qpack blob has the same
+   internal gate/up/down byte offsets (only the blob's base address differs
+   per expert), so one dispatch per stage suffices: 38 dispatches/MoE-layer
+   -> 9. Gated on this model's actual expert quant profile (4-bit,
+   groupSize%8==0, matching `gemv_affine_fast`'s existing eligibility check)
+   and on qpack+`ExpertCache` mode specifically -- the non-cache "stacks"
+   fallback path is untouched.
+
+Verified: new `MetalKernelTests.gemvMoEBatchedMatchesCPU` (K=3 synthetic
+expert blobs, dual-stage and single-stage, `< 1e-3` vs CPU reference); full
+`swift test` (63 tests) green after updating `FastPathBaseline`'s
+hardcoded dispatch-count regression constants to the new, lower counts (by
+design -- the tripwire is meant to catch exactly this kind of change).
+Full-model: two paired runs (`SWIFTLET_NO_MOE_BATCH=1` vs default), same
+reference prompt, generated text **byte-identical** to `gate10_heap.out` in
+all four runs (both flag states, both repeats).
+
+Measured decode throughput, `--cache-gb 2`, same reference qpack/prompt,
+two paired runs on this machine (variance noted throughout this file is
+real -- both pairs run back-to-back for a controlled comparison):
+
+| Run | No batching (flag forced off) | Batching (default) | Delta |
+|---|---|---|---|
+| 1 | 9.35 tok/s | 9.85 tok/s | +5.3% |
+| 2 | 9.41 tok/s | 9.94 tok/s | +5.6% |
+
+Total GPU compute dispatches for the 200-step decode run dropped by almost
+half (354,400 -> 178,400), but decode wall only improved ~5%: most of
+decode's GPU time is real compute (bandwidth-bound GEMV), not per-dispatch
+fixed overhead, more than the earlier byte-budget-vs-measured gap implied.
+A real, verified win, smaller than the dispatch-count drop alone would
+suggest -- set against `handoff.md`'s honest ceiling estimate, this lands at
+the low end of "double-digit-percent" rather than the high end.
+
+**Running total after this: ~9.4 -> ~9.9 tok/s from this change (+5-6%),
+compounding onto the 5.79 -> ~9.4 baseline above.**

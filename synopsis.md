@@ -263,18 +263,23 @@ Above the floor, everything extra is expert cache:
   not a proper sweep across cache budgets and prompt lengths -- directional,
   not a benchmark.
 
-## Status as of 2026-09-02: decode-throughput optimization in progress, paused
+## Status as of 2026-09-02: decode-throughput optimization, MoE fusion landed
 
 **See `handoff.md` for the full handoff to continue this** -- exact repo/
 commit state (two local git repos, `Swiftlet/` and this root, nothing
-pushed), what was tried and rejected and why, and the open next decision.
-Short version: decode throughput went from 5.79 to ~9.3-9.98 tok/s (~60-72%
-cumulative, `--cache-gb 2`, same reference qpack/prompt) across three real
-fixes (concurrent expert-cache fill, corrected a measurement bug, heap-based
-LFU eviction), all verified byte-identical output at every step. A cache-
-budget sweep and a fill/GPU-dispatch overlap idea were both investigated and
-rejected with real evidence (see `CONVERSION_PLAN.md` "Decode throughput"
-for the numbers on both). Real per-category GPU timing (not just the
-analytical model) points at MoE kernel fusion as the best-evidenced next
-lever, but that decision was never made -- it's open, not deferred by
-choice.
+pushed), what was tried and rejected and why. Short version: decode
+throughput went from 5.79 to ~9.4-9.94 tok/s (`--cache-gb 2`, same reference
+qpack/prompt) across three real fixes (concurrent expert-cache fill,
+corrected a measurement bug, heap-based LFU eviction), then a further +5-6%
+from MoE kernel fusion (a new bindless batched-GEMV Metal kernel collapsing
+`encodePendingMoE`'s up to 38 per-MoE-layer dispatches down to 9) -- all
+verified byte-identical output at every step. A cache-budget sweep and a
+fill/GPU-dispatch overlap idea were both investigated and rejected with real
+evidence (see `CONVERSION_PLAN.md` "Decode throughput" for the numbers on
+both); MoE fusion was investigated, pursued, and landed (see
+`CONVERSION_PLAN.md` "MoE kernel fusion" and `handoff.md`) -- a real win,
+smaller than the ~2x total-dispatch-count reduction suggested, since most of
+decode's GPU time turned out to be real compute rather than per-dispatch
+overhead. No further work is planned in this specific arc; the cache-budget
+and longer-context sweeps `design/BENCHMARK_PLAN.md` calls for remain open,
+unrelated to and unaffected by the fusion work.

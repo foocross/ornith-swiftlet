@@ -1,0 +1,26 @@
+loading tokenizer + model...
+prefill S3a: 21 tok wall=2.807s wait=1.350s/1071 cb=1071 err=0 dispatch=18692 lm=1 skip=20 gpu=0.978s/1071 timed/0 n/a
+prefill expert cache: 3730 hits / 2990 misses (56% hit rate), fill 1.216s of 2.807s prefill wall
+[QwenMetalModel] descriptors ready; building fast path...
+[QwenMetalModel] fast path ready
+The user wants a short paragraph about the history of the Netherlands. Let me write a concise but informative paragraph covering the key points of Dutch history.
+
+Key points to include:
+- Early history (Germanic tribes, Roman influence)
+- Formation of the Netherlands
+- The Golden Age (17th century) - maritime power, trade, VOC
+- Spanish rule and independence (Eighty Years' War)
+- Colonial empire
+- Modern era
+
+Let me write a well-structured short paragraph.
+</think>
+
+# The History of the Netherlands
+
+The Netherlands has a rich and storied history that stretches back over two thousand years, when the region was inhabited by Germanic tribes and later came under Roman influence. During the Middle Ages, these low-lying lands were a patchwork of counties and duchies, gradually reclaimed from the sea through an ingenious system of dikes, canals, and windmills that defined the Dutch relationship with water. The modern nation emerged in decode: 200 tokens in 20.1s (9.94 tok/s)
+decode Metal S3a: steps=200 cb=10200 err=0 wait=11.547s/10200 dispatch=178400 gpu=9.198s/10200 timed/0 n/a
+expert cache: 1213 slots (2.0 GB), 42626 hits / 28094 misses (60% hit rate) [cumulative, prefill+decode]
+decode expert cache: 38896 hits / 25104 misses (61% hit rate), fill 5.658s (0.225ms/miss avg, 25.239ms max), bookkeeping 0.117s of 20.1s decode wall
+decode loop overhead: argmax 0.033s, text-decode 0.024s of 20.1s decode wall
+

@@ -8,13 +8,26 @@ to do next.
 
 ## Where things stand right now
 
-**Decode throughput: 5.79 -> ~9.3-9.98 tok/s (~60-72% cumulative improvement),
-`--cache-gb 2`, same reference qpack/prompt throughout.** Run-to-run variance
-on this machine is real (thermal/load noise) -- treat anything in that range
-as "current state," not a single precise number. All changes verified
-byte-identical generated output against the pre-change baseline at every
-step; all 62 Swiftlet tests + 27 standalone `ornith-swiftlet-port` tests
+**Decode throughput: 5.79 -> ~9.4-9.94 tok/s from the fill/eviction arc, plus
+a further +5-6% from MoE kernel fusion on top of that (`--cache-gb 2`, same
+reference qpack/prompt throughout).** Run-to-run variance on this machine is
+real (thermal/load noise) -- treat anything in that range as "current
+state," not a single precise number. All changes verified byte-identical
+generated output against the pre-change baseline at every step; all 63
+Swiftlet tests (62 + 1 new) + 27 standalone `ornith-swiftlet-port` tests
 still pass.
+
+The "pursue MoE kernel fusion" decision this file left open is now resolved
+(the user chose to pursue it): `encodePendingMoE`'s per-expert GEMV/silu_mul
+loops (up to 38 dispatches/MoE-layer) are now a bindless batched dispatch
+(9/MoE-layer) behind `SWIFTLET_NO_MOE_BATCH=1` (default: batching on). See
+`CONVERSION_PLAN.md` "MoE kernel fusion" for the full design/verification
+detail -- short version: real, verified (byte-identical output, 63/63 tests
+including a new numeric kernel test, `FastPathBaseline`'s dispatch-count
+constants updated to match), but a smaller win than the halved dispatch
+count suggested (+5-6% decode tok/s, not the higher end of the "double-digit"
+estimate this file floated) -- most of decode's GPU time turned out to be
+real compute, not per-dispatch overhead.
 
 ## Repo/commit state -- nothing pushed anywhere
 
@@ -106,24 +119,45 @@ asked.
    experts' gate/up/down GEMVs into fewer, larger dispatches) as the
    best-evidenced next lever.**
 
-## Where I stopped: the open decision
+## MoE kernel fusion: done, this session
 
-I asked whether to pursue MoE kernel fusion next and the question got
-interrupted before an answer came back -- **that decision is still open,
-nothing about it has been decided either way.** Whoever picks this up
-should re-ask it rather than assume.
+The open decision this file previously left ("pursue MoE kernel fusion
+next?") is resolved -- pursued, landed, verified. Summary (full detail in
+`CONVERSION_PLAN.md` "MoE kernel fusion"):
 
-The honest framing for that question: MoE fusion is now well-evidenced
-(real GPU timestamps, not a hunch), but it's a genuine Metal kernel
-rewrite of `encodePendingMoE` in `QwenMetalModel.swift` -- batching
-multiple experts' GEMVs into fewer dispatches touches numerics-sensitive
-code with real correctness surface, unlike every fix so far in this
-session (concurrent fill, LFU eviction, category-timing diagnostic), which
-were all either provably correctness-neutral (any eviction choice is
-valid) or additive/opt-in with a verified no-op default path. This one
-isn't in that category -- it needs the same byte-identical-output
-verification discipline used throughout, but the risk of a subtle
-numerics bug is real in a way it wasn't for the earlier changes.
+- New Metal kernel `gemv_moe_batched` (`Kernels.metal.txt`) + Swift encode
+  helper `MetalEngine.encodeGemvMoEBatched`/blocking test wrapper
+  `gemvMoEBatchedBlocking`. First bindless (GPU-address-array) kernel in
+  this codebase -- every expert's qpack blob has the same internal
+  gate/up/down byte layout, so a tiny per-layer buffer of K raw
+  `MTLBuffer.gpuAddress` values plus `enc.useResource` lets one dispatch
+  cover all K resident experts.
+- `encodePendingMoE` (`QwenMetalModel.swift`): gate+up now one dispatch
+  across all K experts (was 2K), down now one dispatch (was K); `silu_mul`
+  batched unconditionally (K per-expert calls -> 1, pure dispatch-count
+  win, no new kernel needed -- the outputs were already contiguous by
+  expert index). 38 dispatches/MoE-layer -> 9.
+- Gated behind `SWIFTLET_NO_MOE_BATCH=1` (default: on), mirroring
+  `SWIFTLET_NO_FAST_GEMV`'s shape; only engages in qpack+`ExpertCache`
+  mode with this model's actual expert quant profile (4-bit,
+  groupSize%8==0) -- the non-cache "stacks" fallback is untouched.
+- Verified: new `MetalKernelTests.gemvMoEBatchedMatchesCPU` (K=3 synthetic
+  blobs, dual- and single-stage, `<1e-3` vs CPU reference); full `swift
+  test` (63/63) after updating `FastPathBaseline`'s hardcoded dispatch
+  counts (fails by design post-change, fixed to the new real counts, not
+  worked around); two paired full-35B-model runs (flag on/off), generated
+  text byte-identical to `gate10_heap.out` in all four runs.
+- Result: **+5-6% decode tok/s** (9.35->9.85, 9.41->9.94 across two paired
+  runs), smaller than the ~2x total-dispatch-count drop
+  (354,400->178,400 over the 200-step run) would suggest -- most of
+  decode's GPU time is real compute, not per-dispatch overhead, more than
+  the earlier byte-budget-vs-measured gap implied. A real, verified win,
+  landing at the low end of the "double-digit-percent" estimate this file
+  previously floated rather than the high end.
+
+No further MoE-fusion work is planned as part of this arc; what's still
+open (cache-budget sweep, longer-context sweep -- see "Key files" below)
+is unrelated to this change and was already open before it.
 
 ## How to reproduce / continue benchmarking
 
@@ -154,27 +188,46 @@ unset -- verified each time they were added):
   tok/s unrepresentative of production -- only the relative category
   split is meaningful.
 
-Before trusting any further optimization: rebuild, run `swift test` (62
+Before trusting any further optimization: rebuild, run `swift test` (63
 tests), run the reference command, and diff the generated text byte-for-byte
 against a prior run's `.out` file (several are kept in `scratch/`, e.g.
 `gate10_heap.out`) -- this is how every change in this arc was verified,
 and it's cheap enough that skipping it isn't worth it.
 
+- `SWIFTLET_NO_MOE_BATCH=1` -- forces `encodePendingMoE`'s original
+  per-expert GEMV/silu_mul loop instead of the batched dispatch (default:
+  batching on). A/B-debugging escape hatch, same shape as
+  `SWIFTLET_NO_FAST_GEMV`.
+
 ## Key files
 
 - `Swiftlet/Sources/SwiftletCore/ExpertCache.swift` -- concurrent fill +
-  heap-based LFU eviction (this session's core fix).
+  heap-based LFU eviction (fill/eviction arc's core fix).
 - `Swiftlet/Sources/SwiftletCore/Qpack.swift` -- `QpackExpertReader`,
   thread-safe fd-open.
 - `Swiftlet/Sources/SwiftletCore/QwenMetalModel.swift` -- `stepOneFast`/
   `encodePendingMoE` is the real decode hot path (not `moeForward`, which
   looked like it at first glance but isn't what `--gpu` decode actually
-  runs). Category-timing diagnostic and `drainPendingMoE` helper live here
-  too. This is where MoE fusion would happen if pursued.
-- `Swiftlet/Sources/SwiftletCLI/main.swift` -- all the stats-line
-  instrumentation added this session.
+  runs). Category-timing diagnostic, `drainPendingMoE` helper, and the
+  MoE-fusion wiring (`moeBatchEligible`, `moeExpertBases`, the batched
+  gate+up/down dispatches in `encodePendingMoE`) all live here.
+- `Swiftlet/Sources/SwiftletCore/MetalEngine.swift` -- `gemv_moe_batched`'s
+  Swift-side encode helper (`encodeGemvMoEBatched`) and blocking test
+  wrapper (`gemvMoEBatchedBlocking`).
+- `Swiftlet/Sources/SwiftletCore/Kernels.metal.txt` -- `gemv_moe_batched`,
+  the bindless batched-GEMV kernel itself.
+- `Swiftlet/Tests/SwiftletCoreTests/MetalKernelTests.swift` --
+  `gemvMoEBatchedMatchesCPU`, the new kernel's numeric correctness test.
+- `Swiftlet/Tests/SwiftletCoreTests/MetalModelTests.swift` --
+  `FastPathBaseline`'s dispatch-count constants, updated for the new
+  batched dispatch counts (split into `q4Baseline`/`q35Baseline`, non-cache
+  fixtures, vs. `q4StreamingBaseline`, the real `ExpertCache` path, since
+  they now diverge).
+- `Swiftlet/Sources/SwiftletCLI/main.swift` -- stats-line instrumentation
+  from the fill/eviction arc.
 - `CONVERSION_PLAN.md` -- the full numbers/narrative for every step above,
   written as it happened; the primary source, this file is a summary of it.
 - `ornith-swiftlet-port/design/BENCHMARK_PLAN.md` -- the pre-existing Gate
   0-5 plan this whole arc followed; Gate 3 (cache-budget sweep across a
-  full corpus) and a longer-context sweep are still open per that plan.
+  full corpus) and a longer-context sweep are still open per that plan,
+  and unaffected by the MoE-fusion work above.

@@ -1,0 +1,44 @@
+loading tokenizer + model...
+prefill S3a: 21 tok wall=3.004s wait=1.513s/1071 cb=1071 err=0 dispatch=37172 lm=1 skip=20 gpu=1.091s/1071 timed/0 n/a
+prefill expert cache: 3730 hits / 2990 misses (56% hit rate), fill 1.231s of 3.004s prefill wall
+[QwenMetalModel] descriptors ready; building fast path...
+[QwenMetalModel] fast path ready
+The user wants a short paragraph about the history of the Netherlands. Let me write a concise but informative paragraph covering the key points of Dutch history.
+
+Key points to include:
+- Early history (Germanic tribes, Roman influence)
+- Formation of the Netherlands
+- The Golden Age (17th century) - maritime power, trade, VOC
+- Spanish rule and independence (Eighty Years' War)
+- Colonial empire
+- Modern era
+
+Let me write a well-structured short paragraph.
+</think>
+
+# The History of the Netherlands
+
+The Netherlands has a rich and storied history that stretches back over two thousand years, when the region was inhabited by Germanic tribes and later came under Roman influence. During the Middle Ages, these low-lying lands were a patchwork of counties and duchies, gradually reclaimed from the sea through an ingenious system of dikes, canals, and windmills that defined the Dutch relationship with water. The modern nation emerged in decode: 200 tokens in 21.4s (9.35 tok/s)
+decode Metal S3a: steps=200 cb=10200 err=0 wait=12.531s/10200 dispatch=354400 gpu=10.016s/10200 timed/0 n/a
+expert cache: 1213 slots (2.0 GB), 42626 hits / 28094 misses (60% hit rate) [cumulative, prefill+decode]
+decode expert cache: 38896 hits / 25104 misses (61% hit rate), fill 5.866s (0.234ms/miss avg, 25.420ms max), bookkeeping 0.120s of 21.4s decode wall
+decode loop overhead: argmax 0.033s, text-decode 0.025s of 21.4s decode wall
+
+       25.93 real         4.27 user        10.11 sys
+          4737662976  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              367571  page reclaims
+                  27  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                7676  voluntary context switches
+              113077  involuntary context switches
+         75890782939  instructions retired
+         47038379555  cycles elapsed
+          3789295864  peak memory footprint
