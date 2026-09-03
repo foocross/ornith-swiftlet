@@ -246,6 +246,19 @@ Above the floor, everything extra is expert cache:
 
 ## Known gaps (inherited from the original overlay scope, not new)
 
+- **CRACK abliteration damages code generation.** Verified by running the
+  identical Space Invaders prompt against the official non-abliterated
+  `ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit` checkpoint through the same
+  Swiftlet build/serve/decode path. The official checkpoint produced 2676
+  tokens with a complete `<script>` block containing real game logic
+  (canvas setup, keyboard input, `requestAnimationFrame` game loop, HUD).
+  CRACK produced 576 tokens: broken CSS, no `<script>` tag at all, and the
+  model narrating its own failure. This is a property of the CRACK
+  fine-tune, not a bug in the conversion pipeline or Swiftlet -- the two
+  tensor bugs documented in "Two real bugs" above were verified against prose
+  only and remain correctly fixed. `test-handoff.md` has the full
+  experiment setup and results; it can be deleted now that the question is
+  resolved.
 - Text-only, native K=8. No MTP speculative decoding (GGUF's `blk.40` is
   dropped), no vision (not present in this GGUF regardless).
 - ~~Swiftlet's expert-cache fill path is still serial reads per miss; the
@@ -259,6 +272,19 @@ Above the floor, everything extra is expert cache:
   eviction (now a min-heap), for a running total of ~9.98 tok/s (~72%
   cumulative). Not yet re-swept across other cache budgets or longer
   contexts.
+- `--cache-gb` above 2 is still not a lever (see `CONVERSION_PLAN.md`
+  "`--cache-gb` sweep: not a lever here" and its follow-up
+  "`--cache-gb` gap revisited"): raising it grows hit rate a lot but decode
+  wall barely moves, because a "wait-minus-real-exec" gap grows alongside
+  the larger resident-buffer set (2.76s at 1213 slots -> 4.83s at 4854
+  slots) and offsets the fill savings. A follow-up session tested the
+  leading hypothesis (Metal per-resource hazard-tracking overhead scaling
+  with slot count, fixable via `.hazardTrackingModeUntracked`) with a real
+  A/B measurement, not just reasoning -- and the hypothesis was rejected:
+  the gap grew almost identically with or without it, slightly *worse* at
+  the largest cache size across a repeat run. Change reverted, no flag left
+  behind. Memory pressure on this 18GB-unified-memory machine is the
+  remaining, untested explanation.
 - The reported tok/s figures are from two short runs (80 and 200 tokens),
   not a proper sweep across cache budgets and prompt lengths -- directional,
   not a benchmark.
@@ -293,3 +319,142 @@ benchmarked. The cache-budget and longer-context sweeps
 `design/BENCHMARK_PLAN.md` calls for remain open; the longer-context sweep
 in particular is now the natural next step to get real numbers on that
 growth curve rather than the two-point comparison done so far.
+
+**Follow-up session (same date):** two speculative-decoding options (MTP,
+using the GGUF's own dropped `blk.40` head; DFlash, a diffusion-drafter
+technique) were evaluated and neither was pursued this session -- MTP is
+architecturally plausible but blocked on a decode-loop this codebase
+doesn't have yet and an unresolved GatedDeltaNet-state-rollback question;
+DFlash needs a trained drafter model that doesn't exist for this checkpoint.
+Revisited the `--cache-gb` "not a lever" finding with a concrete mechanism
+(Metal hazard-tracking overhead) and tested it directly rather than leaving
+it as an open theory -- see the new "Known gaps" bullet above and
+`CONVERSION_PLAN.md` "`--cache-gb` gap revisited" for the full A/B
+measurement. Rejected with real evidence, change reverted; no throughput
+change from this session, but the conclusion is now backed by an experiment
+instead of an assumption.
+
+## Base model build (2026-09-02): `scratch/ornith-1.5-35b-base.qpack`
+
+Everything above through "Known gaps" is about the CRACK (abliterated)
+build specifically. Separately, the plain base model --
+`ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit`, the same official checkpoint used
+throughout this document as the ground-truth reference for verifying the
+CRACK tensor conversion and for the Space Invaders code-generation
+comparison -- was built directly with:
+
+```sh
+swiftlet-repack --from-hf ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit \
+  --output scratch/ornith-1.5-35b-base.qpack
+```
+
+No GGUF dequantization/requantization round-trip needed (`ornith-ai`
+publishes this checkpoint already in the mlx-lm runtime layout
+`swiftlet-repack --source` expects), so neither of the "Two real bugs"
+above applies -- this path never touches the CRACK conversion script at
+all. See `CONVERSION_PLAN.md` "Base model build" for the command and
+rationale.
+
+**Status: done, verified working.** `swiftlet-repack --from-hf` streamed
+and repacked the checkpoint directly (18GB qpack, 547.7s wall). Sanity-run
+with `swiftlet generate scratch/ornith-1.5-35b-base.qpack --gpu --chat
+--cache-gb 2 --max-new 60`: loaded clean, produced coherent, on-topic
+output (the model's usual reasoning-trace style, "Let me think about what
+I know about this topic... Basic idea: ..." for a mixture-of-experts
+explanation prompt) -- no token salad, unlike the CRACK build's first
+attempt. Decode: 60 tokens in 5.4s (**11.17 tok/s**, 55-56% expert-cache
+hit rate at `--cache-gb 2`), noticeably faster than the CRACK build's
+original 4.9-7.8 tok/s baseline, consistent with the decode-throughput
+work landed since that baseline was measured (MoE kernel fusion, CPU
+attention-core vectorization, heap-based LFU eviction -- see the sections
+above). `scratch/ornith-1.5-35b-base.qpack` is now the base-model
+counterpart to `scratch/ornith-1.5-35b-crack.qpack`; use it for anything
+that wants the non-abliterated model (e.g. code generation, per the CRACK
+regression noted in "Known gaps" above).
+
+## Memory-pressure diagnostic + KV-cache INT8 quantization (2026-09-03)
+
+Two follow-ups from a deep-research pass (`research/research.txt`) chosen
+by the user out of 9 candidate ideas, both closing questions this project's
+own docs had already left open rather than starting speculative new work.
+
+**Memory-pressure diagnostic**: the "`--cache-gb` gap" (GPU wait-minus-exec
+time growing with expert-cache slot count) had a hazard-tracking-mode
+explanation already tested and rejected in an earlier session, leaving
+real memory pressure on this 18GB unified-memory machine as the untested
+theory. Instrumented with `vm_stat`/`footprint` sampling across
+`--cache-gb` 2/4/6/8 (`scratch/memory_pressure_sweep.sh`, against
+`base.qpack` since `crack.qpack` no longer exists on disk). Disk swap
+ruled out; memory-compressor churn (a distinct macOS mechanism) tracked
+the gap's growth -- a real, if not perfectly clean, confirmation. Details:
+`CONVERSION_PLAN.md` "Memory-pressure hypothesis".
+
+**KV-cache INT8 quantization, now the default.** The FP32 K/V cache for
+the 10 full-attention layers (the only per-context-length-growing memory
+cost, `QwenCPUModel.DecodeState.kv`) is quantized to INT8 by default:
+group size = headDim, one affine scale/bias pair per (position, kvHead),
+mirroring the MLX-affine convention already used for weight quantization.
+`SWIFTLET_KV_QUANT=off`/`fp32` reverts to the old FP32 path. Real-data
+prototyping against actual dumped K/V (`scratch/kv_quant_prototype.py`)
+found the plan's original "start with INT4" recommendation had a real
+~10-20% quality cost at per-token granularity; INT8 measured near-lossless
+(cosine similarity >0.9999), so INT8-only is what shipped, confirmed with
+the user after the data contradicted the original plan.
+
+Verified at short context first (68/68 unit tests, byte-identical FP32
+output when reverted, coherent INT8 output), then -- since the KV cache is
+too small a fraction of total footprint at ~200 tokens to see any memory
+effect -- at the long-context scale where it actually matters:
+`scratch/kv_quant_long_context_sweep.sh` ran FP32 vs INT8 sequentially at
+`--cache-gb 2`, each generating ~20-25K tokens (both stopped naturally at
+EOS, well short of the 32,768-token cap). Result: **+14% decode throughput,
+-20% peak process footprint, no coherence regression** at real long-context
+scale. One clarifying negative finding: the `--cache-gb` gap above did
+*not* shrink under INT8 at a fixed cache budget, suggesting it's driven by
+expert-cache traffic rather than KV-cache size, at least at `--cache-gb 2`.
+Full numbers: `CONVERSION_PLAN.md` "Long-context sweep".
+
+Not wired into `ExpertCacheMemoryGovernor`'s cache-sizing math -- confirmed
+that governor isn't on `swiftlet generate`'s actual cache-sizing route
+today regardless (see "Verifying all parts of the port" above), so this is
+a deliberate scope limit. `ArchConfig.kvBytesPerTokenInt8` exists for
+accounting and future wiring.
+
+## Expert I/O hint (`F_NOCACHE`), now the default (2026-09-03)
+
+Closes the rest of research idea #4 (the memory-pressure diagnostic above
+only instrumented and explained the `--cache-gb` gap; this tests an actual
+fix). `Qpack.swift`'s `QpackExpertReader` now sets `F_NOCACHE` on every
+`packed_experts` fd by default -- avoids double-caching hot expert blobs
+in both the OS's page cache and `ExpertCache`'s own resident
+`.storageModeShared` buffers, the same redundant-caching shape behind the
+confirmed compressor-churn mechanism. Measured directly against this
+pipeline (not assumed from the research doc's differently-sourced claim
+that no I/O hint helps): a real, reproducible **~14-15% decode-throughput
+win at `--cache-gb 2`** (the shipped default; 3 clean repeats each side,
+byte-identical output), a small ~2-4% regression at `--cache-gb 8` (already
+documented as not a useful setting here) -- net win taken as the new
+default, `SWIFTLET_EXPERT_NOCACHE=0` reverts. Full numbers and the two
+`research/research.txt` idea #4 items deliberately declined (2MB-aligned
+buffers -- doesn't apply, no copy step to remove; deleting the wired
+expert cache to trust the OS page cache entirely -- would abandon the
+bounded-memory guarantee `ExpertCache` exists for, including for iOS
+jetsam avoidance): `CONVERSION_PLAN.md` "Expert I/O hint sweep".
+
+## Research idea #2 (3-bit expert weights + DMA alignment): investigated, skipped
+
+Checked against the actual code, not the research doc's own effort
+estimate: 3-bit expert quantization is gated out today at three separate
+layers (`Checkpoint.swift`'s loader rejects non-4/8-bit specs,
+`ArchConfig.swift`'s memory-governor math hardcodes 4-bit byte sizing, and
+the fused `gemv_moe_batched` MoE kernel has no `bits` field at all -- it's
+structurally nibble-only, with 3-bit falling back to the slow scalar path
+otherwise), and MLX's real 3-bit packing (confirmed by quantizing a test
+vector and decoding the packed words by hand) is a continuous cross-word
+bitstream, not the per-word-isolated scheme the existing dequant math
+assumes -- a new unpack algorithm, not a new case. The DMA-alignment half
+doesn't apply either: expert-cache fills already `pread` straight into the
+`MTLBuffer`'s own backing memory with no intermediate staging buffer to
+realign. High effort/risk against a modest (~5-10%) claimed payoff; ranked
+behind ideas #5 and #6. Full writeup: `CONVERSION_PLAN.md` "`research/
+research.txt` idea #2 ... investigated, skipped".

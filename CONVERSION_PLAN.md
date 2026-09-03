@@ -379,3 +379,506 @@ memory math targets.
 **Running total after this: ~9.9 -> ~10.3-11.1 tok/s depending on context
 length so far reached in a run (larger win at longer context), compounding
 onto the 5.79 -> ~9.9 baseline above.**
+
+### `--cache-gb` gap revisited: hazard-tracking hypothesis tested, rejected
+
+Follow-up session, prompted by re-reading `handoff.md`/`synopsis.md` for the
+next lever rather than a new trace. The original `--cache-gb` sweep (above)
+left the growing "wait-minus-real-exec" gap (2.76s at 1213 slots -> 4.83s at
+4854 slots, real GPU exec time flat at ~9.7-10.1s throughout) as an
+observation, not an explained cause. Re-reading the existing sweep logs
+(no new runs needed for this part) confirmed the gap tracks slot count
+specifically, not the workload: dispatch count (410400) and command-buffer
+count (10200) are identical across every cache size in those logs.
+
+**Hypothesis:** `ExpertCache`'s slot buffers are allocated plain
+`.storageModeShared`, but every other persistent, manually-synchronized
+buffer in `QwenMetalModel.swift` (`sBuf`, `hBuf`, per-layer `hist`/`state`)
+already uses `.hazardTrackingModeUntracked`, on the reasoning that the
+decode loop's own `waitUntilCompleted` sequencing (the same data-dependency
+chain documented above under "fast-path fill/GPU-dispatch overlap that
+wasn't") already guarantees the ordering Metal's automatic hazard tracking
+would otherwise redundantly track. `ExpertCache` slots are under the
+identical discipline (a fill's `pread` completes via `group.wait()` before
+the buffer reaches an encoder; a slot is only evicted/refilled after the
+command buffer(s) that last read it have already completed) but never got
+the same treatment -- a real, precedented gap, and a plausible mechanism for
+per-resource driver overhead that scales with the *number of tracked
+buffers*, which is exactly what grows with `--cache-gb`.
+
+**Tested, not just reasoned about:** implemented (gated behind
+`SWIFTLET_NO_EXPERT_CACHE_UNTRACKED`, mirroring the `SWIFTLET_NO_MOE_BATCH`/
+`SWIFTLET_NO_FAST_GEMV` escape-hatch pattern), verified byte-identical
+output against `gate10_heap.out` and full `swift test` (63/63), then
+measured paired runs (same binary, same qpack/prompt, `--cache-gb`
+2/4/6/8, untracked vs. tracked):
+
+| cache-gb | untracked (the hypothesis) | tracked (unchanged) | delta |
+|---|---|---|---|
+| 2 | 2.602s | 2.616s | -0.014 |
+| 4 | 3.995s | 3.660s | +0.335 |
+| 6 | 4.423s | 4.177s | +0.246 |
+| 8 | 5.336s / 4.595s (2 runs) | 4.151s / 4.075s (2 runs) | +0.85s avg |
+
+**Rejected.** Untracked mode doesn't shrink the gap -- at the two larger
+cache sizes it's consistently a bit *worse*, replicated across a repeat run
+at `--cache-gb 8`. The gap grows almost identically under both conditions,
+which rules out per-resource hazard-tracking overhead as the mechanism.
+Reverted the change (`ExpertCache.swift` back to the pre-experiment state,
+no flag left behind); `swift test` (63/63) and the reference command still
+pass clean on the reverted tree.
+
+What's left standing, untested, as a more likely explanation: memory
+pressure rather than driver/resource-tracking overhead. This is an
+18GB-unified-memory machine; `--cache-gb 8` plus the resident dense weights
+pushes real usage into a range where the OS/GPU driver may be doing real
+work (page-in, compaction) that shows up as `waitUntilCompleted` latency
+without appearing in Metal's own `gpuStartTime`/`gpuEndTime` window. Checking
+that would need `vm_stat`/working-set instrumentation during a run -- a
+different kind of measurement than anything else in this document -- and
+wasn't pursued further this round, since it wouldn't change the shipped
+default (`--cache-gb 2`) either way. **Conclusion updated, not reversed:**
+`--cache-gb` above 2 still isn't a lever on this machine, now for a
+specific, falsified-by-experiment reason (not a fixable Metal
+resource-tracking inefficiency) rather than an open question.
+
+### Memory-pressure hypothesis: instrumented, partially confirmed
+
+The one thing the hazard-tracking investigation above left standing as an
+*untested* explanation for the gap -- real memory pressure on this
+18GB-unified-memory machine, as opposed to per-resource driver overhead --
+finally got instrumented rather than left as a theory. New scripts:
+`scratch/memory_pressure_sweep.sh` (runs the reference command at
+`--cache-gb` 2/4/6/8, repeating 8, while sampling `vm_stat` system-wide and
+`footprint -p <pid>` per-process in parallel) and
+`scratch/analyze_memory_pressure.py` (correlates both against the existing
+`decode Metal S3a` wait/gpu stats line).
+
+**Caveat on comparability:** `scratch/ornith-1.5-35b-crack.qpack` -- the
+model used for every number in the original sweep above -- no longer
+exists on this disk (per its own documented cleanup). This run used
+`scratch/ornith-1.5-35b-base.qpack` instead (same architecture/memory
+layout, different weights). Absolute tok/s and gap magnitudes here don't
+match the CRACK-build figures above 1:1; what's being tested (does a
+memory-pressure signal track the growing gap in *shape*) is a property of
+the runtime/memory layout, not the specific weights, so this is still a
+valid test of the hypothesis, just not a byte-for-byte reproduction of the
+original numbers.
+
+| `--cache-gb` | slots | wait (s) | gpu exec (s) | **gap (s)** | footprint peak (MB) | compressor-in (pages) | decompressions (pages) | pageins (pages) | swapins/outs |
+|---|---|---|---|---|---|---|---|---|---|
+| 2 | 1,213 | 17.279 | 14.022 | **3.257** | 3,788 | 2,313,450 | 322,167 | 725,361 | 0 / 0 |
+| 4 | 2,427 | 16.214 | 11.801 | **4.413** | 5,938 | 4,651,794 | 878,063 | 637,372 | 0 / 0 |
+| 6 | 3,640 | 19.922 | 14.533 | **5.389** | 8,087 | 7,144,340 | 938,790 | 620,152 | 0 / 0 |
+| 8 (run 1) | 4,854 | 20.856 | 14.297 | **6.559** | 10,240 | 10,764,022 | 1,287,927 | 647,470 | 128 / 0 |
+| 8 (run 2) | 4,854 | 21.151 | 14.989 | **6.162** | 10,237 | 9,708,457 | 990,323 | 640,449 | 149 / 0 |
+
+The gap reproduces the same growing shape as the original CRACK-build
+sweep (there: 2.76s -> 4.83s; here: 3.26s -> ~6.2-6.6s -- different
+absolute numbers, same monotonic growth with cache size).
+
+**Two of the four memory-pressure signals don't track the gap at all:**
+`pageins` is flat-to-slightly-*declining* as cache size grows (725K at
+2GB down to ~640-647K at 6-8GB) -- the opposite of what the hypothesis
+predicts. `swapouts` is zero at every cache size; `swapins` is zero
+everywhere except a handful of events (128-149) at the largest cache size
+-- present, but far too small in count to explain a multi-second gap by
+itself. Raw disk-swap pressure is not the mechanism.
+
+**Two signals do track it, cleanly:** compressor pages-in and
+decompression counts both grow monotonically with cache size, roughly in
+step with `phys_footprint` (2.3M -> 10.8M compressor-in pages, 322K ->
+1.29M decompressions, both scaling with cache-gb the same way `gap_s`
+does). This is macOS's memory compressor -- distinct from disk swap --
+compressing/decompressing pages under memory pressure without ever
+touching the SSD. Per-second decompression rates here (roughly 13K-52K/s
+across the runs) are the same order of magnitude as the "abbaglio" trace
+`research/research.txt` cites (60K-130K decompressions/sec correlating
+with the same failure mode: a large, wired-adjacent Metal buffer pool
+squeezing the OS page cache).
+
+**Verdict: partially confirmed, more specific than the open question was.**
+Real memory pressure is a plausible contributor to the gap -- not through
+disk swapping (ruled out, same as raw pageins), but through compressor-pool
+churn that scales with resident buffer size, consistent with `ExpertCache`
+slot buffers (`.storageModeShared`, growing with `--cache-gb`) squeezing
+the OS's own page cache the larger they get. This doesn't reopen the
+hazard-tracking conclusion (that mechanism was tested directly and
+rejected) -- it gives the *other* untested theory from that investigation
+real, if imperfect, supporting evidence instead of leaving it as
+speculation. Caveats: one sweep, mostly single runs per cache size (only
+`--cache-gb 8` repeated), against `base.qpack` not the original
+`crack.qpack`, and background system noise on a shared machine (the
+`--cache-gb 6` run's mid-run `free_last` reading was a noisy outlier) --
+directional evidence, not a controlled, statistically-clean result. Does
+not change the shipped default (`--cache-gb 2`) either way; a real fix
+(e.g. reducing `ExpertCache`'s resident-buffer pressure directly) would be
+new scope, not something this diagnostic pass attempted.
+
+### Expert I/O hint sweep: `F_NOCACHE`, real win at the shipped default
+
+Closes the remaining half of `research/research.txt` idea #4 ("fix SSD IO
+path") the memory-pressure diagnostic above left open: that pass
+instrumented and *explained* the `--cache-gb` gap (macOS memory-compressor
+churn tracking resident-buffer size), but didn't yet test a fix. Mechanism
+targeted directly: `ExpertCache` already holds its own resident copies of
+hot expert blobs in `.storageModeShared` `MTLBuffer`s, so every miss-fill
+was potentially double-cached -- once by the OS's unified buffer cache
+(UBC), once by `ExpertCache`'s own slot -- exactly the redundant-caching
+shape behind the confirmed compressor-churn mechanism. Added
+`fcntl(fd, F_NOCACHE, 1)` on every `packed_experts` fd
+(`Qpack.swift`'s `QpackExpertReader.fd(for:)`), gated by
+`SWIFTLET_EXPERT_NOCACHE` (default on now; `=0` reverts).
+
+`research/research.txt` cites a different codebase's finding that "every
+macOS IO hint tested... default is best" -- tested directly against this
+actual pipeline instead of trusting that citation, per this project's own
+convention. Reference command (`scratch/io_hint_sweep/`, same prompt/qpack
+as the memory-pressure sweep, `--max-new 200`):
+
+| `--cache-gb` | condition | decode tok/s (3 clean repeats) |
+|---|---|---|
+| 2 (shipped default) | OS-cached (old default) | 11.58, 11.73, 11.71 |
+| 2 (shipped default) | `F_NOCACHE` | 13.49, 13.36, 13.27 |
+| 8 | OS-cached (old default) | 10.70, 10.84, 10.63 |
+| 8 | `F_NOCACHE` | 10.57, 10.51, 10.20 |
+
+A first run at `--cache-gb 2` (excluded from the table above) showed the
+*opposite* direction (nocache slower) -- a cold-start/noise outlier per the
+project's established caveat about background noise on this shared
+machine; the following three repeats were tight and consistent, so that
+first run was discarded rather than treated as a tie-breaker.
+
+**Real, reproducible ~14-15% decode-throughput win at `--cache-gb 2` (the
+actual shipped default), a small consistent ~2-4% regression at
+`--cache-gb 8`.** Opposite of the naive hypothesis (double-caching pressure
+should matter *more* at larger cache sizes, not less) -- another instance
+of this project's rule that measuring beats predicting. Since `--cache-gb`
+8 is already documented above ("not a lever worth reaching for here") as
+not a setting worth using for speed, the trade is worth taking as the new
+default rather than staying opt-in. Output verified byte-identical to the
+old path in both directions (`SWIFTLET_EXPERT_NOCACHE=0` reproduces the old
+default exactly; the new default reproduces the old opt-in `=1` path
+exactly) -- `F_NOCACHE` only changes OS caching behavior, never model
+output, and this confirms it. `swift test --filter QpackTests` still
+passes.
+
+**The rest of idea #4, deliberately not pursued:**
+
+- **2MB-aligned `MTLBuffer` allocation for expert-cache slots** (the other
+  half of the doc's suggested "2MB-aligned DMA buffers" item): the cited
+  Flash-MoE win comes from *removing* a host-malloc-then-copy-into-Metal-
+  buffer step -- this pipeline never had that step (`pread` already writes
+  straight into the `MTLBuffer`'s own backing memory, confirmed when idea
+  #2 was scoped and skipped). Re-allocating already-page-aligned
+  `storageModeShared` buffers at a coarser 2MB alignment would add real
+  memory-management complexity (`bytesNoCopy` deallocator lifetime, length
+  rounded to page multiples) for a mechanism that doesn't apply here;
+  not attempted.
+- **"Delete the wired Metal cache, trust the OS page cache instead"** (the
+  more radical redesign the doc's cited source used, trading ~32% slower
+  for a jetsam-invisible footprint): directly contradicts `ExpertCache`'s
+  explicit design goal, stated in its own doc comment -- "replaces OS
+  paging so the working set can never thrash the machine: memory use is
+  exactly `slots * expertStride`, no more" -- which matters specifically
+  for the iOS jetsam-avoidance case this kit targets, not just this Mac.
+  Abandoning the bounded-memory guarantee to chase a throughput number on
+  one hardware target would regress the kit's actual differentiator; not
+  attempted.
+
+Idea #4 is now closed: instrumented, mechanism confirmed, a real fix shipped
+for the shipped default, the rest of its scope explicitly declined with
+reasoning rather than left silently undone.
+
+## Base model build: direct, no GGUF conversion needed
+
+Everything above is specific to the CRACK build, which started from a GGUF
+that had to be dequantized, re-tensor-named, and requantized through mlx_lm
+before it matched the format `swiftlet-repack` expects -- that's where both
+of the "two real bugs" above came from. The plain base model,
+`ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit`, is published by `ornith-ai` itself
+*already* in mlx-lm's post-quantization runtime layout (the same format the
+CRACK pipeline's last conversion step produces), so none of that conversion
+-- and neither of its two bugs -- applies. `swiftlet-repack` streams it
+straight from Hugging Face:
+
+```sh
+swiftlet-repack --from-hf ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit \
+  --output scratch/ornith-1.5-35b-base.qpack
+```
+
+(`--from-hf` is resumable/streaming -- see `swiftlet-repack --help`.) This
+is the same checkpoint already used earlier in this document as the
+ground-truth reference for verifying the CRACK conversion's tensor values,
+and the one used for the Space Invaders code-generation comparison in
+`synopsis.md` ("Known gaps" -- CRACK's abliteration damages code
+generation, verified against this exact base checkpoint).
+
+**Done, verified.** Built in 547.7s to an 18GB qpack
+(`scratch/ornith-1.5-35b-base.qpack`); a 60-token sanity run
+(`--gpu --chat --cache-gb 2`) loaded cleanly and produced coherent,
+on-topic output at 11.17 tok/s, 55-56% expert-cache hit rate -- faster
+than the CRACK build's original baseline, consistent with the throughput
+work landed since ("Decode throughput" above). Full details in
+`synopsis.md` "Base model build".
+
+## KV cache INT8 quantization: implemented, verified
+
+Follow-up to the memory-pressure diagnostic above, and the second half of
+`research/research.txt`'s idea #1 (KV cache compression for the 10
+full-attention layers -- the one component of decode memory that grows
+with context length; the other 30 layers are GatedDeltaNet with fixed-size
+recurrent state). Full detail: `Swiftlet/Sources/SwiftletCore/KVQuant.swift`.
+
+### Real-data prototype first, before touching the hot path
+
+Before writing any Swift, dumped real cached K/V from an actual run
+(`SWIFTLET_DUMP_KV=<dir>`, a new opt-in diagnostic in `main.swift`/
+`QwenCPUModel.DecodeState.dumpFullAttentionKV`, mirroring the existing
+opt-in-env-var convention) and tested quantization error against it with
+`scratch/kv_quant_prototype.py` -- matching this project's own established
+discipline of verifying against real values, not synthetic assumptions
+(`synopsis.md`'s tensor-bug hunt did the same).
+
+Findings, at 421 real tokens across all 10 full-attention layers:
+
+- **INT8, any group size 32-256: essentially lossless** (cosine similarity
+  >0.9999, ~0.6-1.4% relative error).
+- **INT4, per-token** (quantize each token's own row independently, the
+  simplest scheme): cosine similarity 0.986-0.996, ~10-20% relative
+  error -- a real, non-trivial cost, worse than "4-bit is reliably
+  lossless" claims `research/research.txt` borrowed from weight-
+  quantization studies (different tensor shape/distribution).
+- **INT4, per-channel-across-time** (quantize each of the 512 channels
+  using its own scale across many cached positions, the research doc's
+  original, more complex proposal): cosine similarity 0.997-0.999,
+  roughly *half* per-token's relative error, consistently across every
+  layer -- but needs buffering newly-appended tokens until a channel's
+  position-group fills, real added complexity over per-token.
+
+Given that tradeoff, the choice made (not the plan's original "start with
+simple per-token INT4" recommendation, revised after this real measurement
+surfaced the accuracy gap): **ship INT8 per-token only.** Near-lossless at
+any tested granularity sidesteps the INT4 scheme question entirely, at a
+real 4x-ish memory win and the lowest implementation-risk surface.
+
+### Design: group size = headDim, factored-affine-dequant reduction
+
+One affine `w[i] = scale[g]*q[i] + bias[g]` group per (position, kvHead) --
+group size = headDim (256), so exactly 2 groups per cached row (one per
+kv-head), matching the existing MLX-affine convention already used for
+weights (`Checkpoint.swift`, `gemv_affine` in `Kernels.metal.txt`).
+
+The KV-cache read path (`attnCoreCPU`/`attnForward` in `QwenMetalModel.swift`)
+uses `cblas_sgemv` over the *entire* cached K/V arrays per head, not a
+per-element loop -- so quantization can't just dequantize-on-read
+per-element. `attnCoreInt8` (the new shared attention core both paths
+call) widens the INT8 codes to plain `Float` (no scale/bias applied) once
+per layer per step via `vDSP_vfltu8`, runs the *same* `cblas_sgemv` calls
+the FP32 path already had, then factors the affine correction out of the
+reduction algebraically (same trick `gemv_affine` uses on the Metal side
+for weights, rather than materializing true dequantized K/V first):
+
+```
+trueScore[pos] = scale*(kScale[pos]*code[pos] + kBias[pos])·q[head]
+               = kScale[pos]*rawDot[pos] + (scale*qHeadSum)*kBias[pos]
+```
+
+and symmetrically for the softmax-weighted V sum (the bias term becomes a
+constant added to every element of that head's output slice, since
+`vBias` is constant within a (pos,kvHead) group). No FP32 shadow buffer
+persists between steps -- the widened buffer is transient, freed at the
+end of each call, so the resident-memory savings the feature exists for
+still hold; only a temporary compute cost is paid per step.
+
+### Gating and verification
+
+`SWIFTLET_KV_QUANT` (`off`/`fp32` reverts to the old FP32 path; unset or
+anything else means INT8), read once per `QwenMetalModel` instance (an
+instance `let`, mirroring `moeBatchEligible`'s existing convention -- not a
+cached global, so tests can construct two model instances with different
+modes). The CPU-oracle reference path (`QwenCPUModel.attentionForward`)
+never touches the new `kvQuant` storage, regardless of mode -- it stays the
+FP32 ground truth used to verify every other change in this project's
+history, unaffected by this one.
+
+**Promoted to the default after the long-context sweep results below**
+confirmed the real win (+14% decode throughput, -20% peak footprint at
+~20-25K tokens, no coherence regression) -- shipped opt-in first, promoted
+once verified at the context length where it actually matters, not before.
+The GPU-vs-CPU-oracle parity tests below that assert near-bit-exact
+parity at a `<2e-3` tolerance (calibrated for prior, numerically-equivalent
+changes, not this deliberately lossy one) now pin `forceKVQuantMode: .off`
+explicitly rather than relying on an unset env var to mean FP32.
+
+Verified, in order:
+
+1. **`SWIFTLET_KV_QUANT=off` (FP32 path): byte-identical** to the
+   pre-change baseline on the real 200-token reference command against
+   `ornith-1.5-35b-base.qpack` -- confirms zero risk to the escape-hatch
+   path from all the refactoring this needed (factoring `attnCoreInt8` out
+   to be shared by both `attnForward` and `attnCoreCPU` rather than
+   duplicating the new logic a third time; `attnForward`'s FP32 branch also
+   got pulled into its own `attnForwardFP32` function in the process). This
+   check ran before INT8 was promoted to the default -- at the time,
+   "env var unset" was this same FP32 path.
+2. **Two new Swift tests** (`MetalModelTests.swift`,
+   `kvQuantInt8ExercisesRealAttention`/`kvQuantInt8LogitsCloseToFP32`):
+   confirm the INT8 path actually populates `kvQuant` (not silently a
+   no-op), produces finite logits, and stays within a loose but
+   meaningful bound of the FP32 path's logits on a tiny fixture -- a
+   broken affine-correction sign/algebra error would blow this bound, not
+   sit near it. Needed a test-only `forceKVQuantMode` init parameter
+   (`QwenMetalModel`, default nil) after discovering `setenv`/`unsetenv`
+   across concurrently-running Swift Testing tests is racy -- caught by
+   the test itself failing (`fp32GPU.kvQuantMode` read back as `.int8`
+   from a sibling test's concurrent `setenv`), not assumed safe.
+   Full suite: 68/68 (66 pre-existing + 2 new), unaffected default path.
+3. **Real generation on the actual 35B model**
+   (`ornith-1.5-35b-base.qpack`, reference prompt, `--cache-gb 2
+   --max-new 200`): 10.93 tok/s (INT8) vs. 10.98 tok/s (FP32) -- no
+   measurable throughput cost at this context length, the transient
+   per-step widening pass turned out cheaper in practice than the ~12%
+   back-of-envelope estimate (KVH/H = 1/group ratio of the existing BLAS
+   work) suggested. Output diverges from the FP32 run partway through
+   (expected -- this is the first genuinely lossy change in this whole
+   arc, unlike every prior step's byte-identical or numerically-equivalent
+   bar) but **stays coherent**: both responses are well-structured,
+   on-topic, covering the same historical content with different wording,
+   not degradation into repetition or nonsense.
+4. **Memory accounting**: `ArchConfig.kvBytesPerTokenInt8` (mirrors
+   `expertBlobBytesInt4G64`'s bit-accounting template) computes 10,560
+   B/token vs. the FP32 baseline's 40,960 -- ~3.9x, not a clean 4x, due to
+   the per-group FP32 scale/bias overhead (~3% at this group size). Not
+   yet wired into `ExpertCacheMemoryGovernor.plan()`/
+   `OrnithRuntimeFactory`: confirmed against source that path isn't on
+   `swiftlet generate`'s actual cache-sizing route today regardless (see
+   `synopsis.md` "Verifying all parts of the port") -- a real, deliberate
+   scope limit, not an overlooked one.
+
+### Long-context sweep
+
+`ornith-swiftlet-port/design/BENCHMARK_PLAN.md`'s Gate 3 is a cache-
+*budget* sweep, not a context-*length* one -- no pre-existing spec for
+this existed anywhere in the repo despite being referenced repeatedly as
+open. Authored one: `scratch/kv_quant_long_context_sweep.sh`, FP32 vs INT8
+at ~32,768 tokens (the context length `synopsis.md`'s own memory math
+already targets -- `text_config.max_position_embeddings` is 262,144,
+confirmed against the real checkpoint config, well beyond 32K with no
+RoPE-extrapolation concern), sampling per-process `footprint` throughout
+each run (at ~200 tokens, tested same-day, the KV cache is too small a
+fraction of total footprint to see any difference at all -- this is the
+context length where the memory-savings claim can actually be checked
+against reality instead of arithmetic). Sequential, not concurrent runs
+(resource contention on one machine would confound the throughput
+comparison).
+
+**Results** (`scratch/kv_quant_long_sweep-20260903-112659/`, both legs run
+back-to-back on the same machine, same prompt, `--cache-gb 2`):
+
+| | FP32 | INT8 | delta |
+|---|---|---|---|
+| tokens generated | 25,018 | 19,302 | (both stopped at EOS, not the 32,768 cap -- see note below) |
+| decode time | 5,895.4s | 3,990.6s | |
+| decode throughput | 4.24 tok/s | 4.84 tok/s | **+14%** |
+| decode wait/gpu (Metal S3a) | 2,125.7s / 1,501.3s | 1,505.3s / 1,030.0s | gap/token: 0.0250s vs 0.0246s (~unchanged) |
+| expert-cache hit rate (decode) | 58% | 59% | ~unchanged, as expected (same `--cache-gb 2`) |
+| peak process footprint | 7.063 GB | 5.674 GB | **-1.39 GB (-20%)** |
+| footprint growth rate (post-warmup, per token)* | ~119 KB/tok | ~74 KB/tok | **~38% slower growth** |
+
+*computed from the 10%-through-run to end-of-run footprint delta divided by
+tokens generated in that span, to exclude the initial model-load/cache-fill
+ramp. This is *total* process footprint, not KV alone -- it also includes
+the fixed 2GB expert-cache budget and other buffers, so it doesn't isolate
+to the clean ~3.9x reduction `kvBytesPerTokenInt8` predicts for KV bytes
+specifically. Directionally consistent with that prediction (INT8 grows
+slower), not a clean confirmation of the exact ratio.
+
+- **Neither run hit the 32,768-token cap** -- both stopped naturally at
+  EOS. The token-count difference (25,018 vs 19,302) is a real consequence
+  of INT8 being lossy: quantization error in the KV cache nudges the
+  greedy decode path onto a different token sequence partway through
+  (expected and already documented above -- this is the first lossy step
+  in the whole optimization arc), which here happened to reach a natural
+  stopping point sooner. Not a benchmarking artifact, and not comparable
+  to a fixed-length throughput test -- but both are long enough (>19K
+  tokens) to be well past where the earlier 200-token tests could see any
+  KV-driven effect at all.
+- **Coherence holds at long context**: spot-checked start and end of both
+  outputs -- both are complete, well-structured essays covering the full
+  requested scope (prehistoric Netherlands through the 21st century) and
+  end on a proper closing paragraph, not repetition or degradation. INT8
+  diverges in wording/emphasis from FP32 partway through (expected) but
+  never degrades.
+- **The `--cache-gb` wait-minus-gpu gap does not shrink under INT8** at
+  this cache budget (0.0250s/token vs 0.0246s/token, within noise) --
+  worth stating plainly since Part 1 flagged memory pressure as a
+  candidate driver of that gap: at `--cache-gb 2` the expert cache is the
+  same fixed 2GB budget in both legs, so this result suggests the gap is
+  dominated by expert-cache traffic, not KV-cache size, at least at this
+  budget. Confirms the two features address different problems (KV memory
+  headroom vs. the wait/gpu gap) rather than one fixing the other.
+- **Real win confirmed**: decode throughput +14% and peak footprint -20%
+  at ~20-25K tokens of context, with no coherence regression -- this is
+  the first evidence, at real context length, that the memory-savings
+  design goal is actually realized rather than just arithmetically
+  predicted.
+
+## `research/research.txt` idea #2 (3-bit/mixed-precision expert weights + DMA alignment): investigated, skipped
+
+Read against the actual code rather than taken at the doc's own effort
+estimate ("medium... you already have a 4-bit affine dequant kernel, just
+need a 3-bit nibble-unpack with LUT"). Splits into two independent claims;
+both come out worse than the doc suggested.
+
+**DMA alignment**: the doc's Flash-MoE citation (2MB-aligned
+`posix_memalign` + `newBufferWithBytesNoCopy` = 16.8 GB/s vs 4.7 GB/s for
+16KB-aligned Metal buffers) describes a pipeline with a separate
+host-malloc'd staging buffer that gets wrapped/copied into a Metal buffer.
+This codebase doesn't have that step: `ExpertCache.swift` reads a miss
+straight into `slots[s].contents()`, and `Qpack.swift`'s `readExpert`
+`pread`s directly into that `MTLBuffer`'s own backing memory
+(`storageModeShared`, already zero-copy/unified). There's no intermediate
+buffer to align differently -- the win Flash-MoE measured comes from
+*removing* a copy step this pipeline never had. Left as an open, cheap,
+decoupled experiment (swap the slot allocator to explicit 2MB alignment,
+rerun the existing cache-budget sweep) if ever revisited, but not expected
+to matter.
+
+**3-bit expert weights**: real effort, worse than "medium," found in three
+places plus one empirical check:
+
+1. `Checkpoint.swift`'s loader: `guard spec.bits == 4 || spec.bits == 8
+   else { throw Error.unsupportedBits(spec.bits) }` -- rejects 3-bit
+   outright today.
+2. `ArchConfig.swift`'s expert-blob byte-size formula (the one behind
+   every `SlotStreamMemoryGovernor` number in `synopsis.md`) hardcodes
+   `expertParamCount * 4 + ...`, not a variable bit-width.
+3. `gemv_moe_batched` in `Kernels.metal.txt` -- the fused kernel from the
+   MoE-fusion win -- has no `bits` field in its params struct at all; it's
+   structurally nibble-only. `QwenMetalModel.swift` gates the fast path to
+   `p.bits == 4` exactly, so any other bit-width falls back to the slow
+   scalar per-expert loop, eating into the very speedup 3-bit chases.
+4. Empirically quantized a test vector with real `mlx.core.quantize(bits=3)`
+   and decoded the packed words by hand: 3-bit packing is a **continuous
+   bitstream across word boundaries** (element 10 straddles the word-0/
+   word-1 boundary), not the per-word-isolated scheme the existing
+   kernels' `perWord = 32 / bits` math assumes (only valid for bits in
+   {2,4,8,16,32}). A 3-bit path needs a genuinely new cross-word unpack
+   routine in both the Swift-side dequant and the Metal kernel, not a new
+   case in the existing one.
+
+**Decision: skip.** Real scope is a new bit-unpack algorithm (Swift +
+Metal), a second bits-gated fast-path kernel (or accept the scalar-path
+regression), the `Checkpoint.swift` gate, and re-derived `ArchConfig`
+memory math -- high effort, not medium -- against the doc's own modest
+impact estimate (~5-10% end-to-end, after the concurrent-fill win already
+took the low-hanging fruit) and a higher correctness-risk surface than the
+KV-quant work above (expert weights are read every decode step in every
+MoE layer, vs. an isolable KV cache -- and the KV-quant prototype already
+showed real quality divergence from an assumed-safe bit-width once
+measured against real data, the same failure mode this would risk again
+with less isolation). Ranked behind `research/research.txt` ideas #5
+(prefix caching) and #6 (speculative decoding via GDN state
+checkpoint/restore), both lower-effort and closing gaps this project's own
+docs already flagged as open.
