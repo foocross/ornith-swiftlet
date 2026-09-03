@@ -10,8 +10,9 @@ to do next.
 
 **Decode throughput: 5.79 -> ~9.4-9.94 tok/s from the fill/eviction arc,
 +5-6% from MoE kernel fusion, plus a further +4-11% (grows with context
-length) from vectorizing the CPU attention core (`--cache-gb 2`, same
-reference qpack/prompt throughout).** Run-to-run variance on this machine is
+length) from vectorizing the CPU attention core, plus a further +14% at
+long context (~20-25K tokens) from KV-cache INT8 quantization -- now the
+default (`--cache-gb 2`, same reference qpack/prompt throughout).** Run-to-run variance on this machine is
 real (thermal/load noise) -- treat anything in that range as "current
 state," not a single precise number. All changes verified byte-identical
 generated output against the pre-change baseline at every step (one
@@ -266,3 +267,85 @@ just without a flag to toggle in one binary.
   0-5 plan this whole arc followed; Gate 3 (cache-budget sweep across a
   full corpus) and a longer-context sweep are still open per that plan,
   and unaffected by the MoE-fusion work above.
+
+## Also investigated this session: CRACK code-generation test, `--cache-gb` gap
+
+**CRACK code-generation bug: confirmed as abliteration damage, not a
+conversion bug.** Ran the Space Invaders prompt against the official
+non-abliterated `Ornith-1.5-35B-A3B-MLX-4bit` checkpoint through the same
+Swiftlet path. Official produced 2676 tokens with real JS game logic;
+CRACK produced 576 tokens with broken CSS and no script tag. This resolves
+the open question from `test-handoff.md` (which can now be deleted). The
+conversion pipeline and Swiftlet are correct; the CRACK fine-tune's
+abliteration specifically damaged long-range structural code generation.
+
+## Also investigated this session: `--cache-gb` gap, hazard-tracking hypothesis (rejected)
+
+Don't re-litigate this without new evidence: the "wait-minus-real-exec grows
+with `--cache-gb`" observation from the original sweep (`CONVERSION_PLAN.md`
+"`--cache-gb` sweep: not a lever here") was followed up with a specific
+mechanism -- `ExpertCache` slot buffers are the one persistent,
+manually-synchronized buffer pool in the codebase that never got
+`.hazardTrackingModeUntracked` (everything else under the same
+synchronization discipline in `QwenMetalModel.swift` already has it) --
+implemented, verified byte-identical + 63/63 tests, then A/B-measured
+across `--cache-gb` 2/4/6/8. **Rejected**: the gap grew almost identically
+with or without it, slightly worse at `--cache-gb 8` across a repeat run.
+Change reverted, nothing landed. Full numbers in `CONVERSION_PLAN.md`
+"`--cache-gb` gap revisited: hazard-tracking hypothesis tested, rejected".
+Memory pressure (18GB unified memory, not per-resource driver overhead) was
+the remaining untested explanation -- see the next section, now tested.
+
+## New this session (2026-09-03): memory-pressure diagnostic + KV-cache INT8 quantization (now the default)
+
+**Memory-pressure diagnostic, partially confirmed.** `scratch/memory_pressure_sweep.sh`
+ran `--cache-gb` 2/4/6/8 (+ repeat at 8) against `base.qpack` (`crack.qpack`
+no longer exists on disk), sampling `vm_stat`/`footprint` throughout each
+run. Disk swap ruled out as a factor. Memory-*compressor* churn (distinct
+from swap) tracked the growing wait-minus-gpu gap across cache sizes --
+real signal, not a clean 1:1 explanation. Full numbers/verdict:
+`CONVERSION_PLAN.md` "Memory-pressure hypothesis: instrumented, partially
+confirmed".
+
+**KV-cache INT8 quantization: implemented, verified, now the default.**
+The growing FP32 K/V cache for the 10 full-attention layers (`DecodeState.kv`)
+is now quantized to INT8 by default -- group size = headDim, one affine
+`scale`/`bias` pair per (position, kvHead), the same MLX-affine convention
+already used for weights. `SWIFTLET_KV_QUANT=off`/`fp32` reverts to the old
+FP32 path (escape hatch, same shape as `SWIFTLET_NO_MOE_BATCH`). New code:
+`KVQuant.swift` (the quantized cache type), `QwenMetalModel.attnCoreInt8`
+(factors the affine dequant out of the `cblas_sgemv` reduction rather than
+materializing dequantized floats, mirroring `gemv_affine`'s trick).
+Real-data prototyping (`scratch/kv_quant_prototype.py`, against actual
+dumped K/V) found INT4 had a real ~10-20% error at per-token granularity --
+ruled out; INT8 measured near-lossless (cosine similarity >0.9999), so
+that's what shipped.
+
+Verified in stages: unit tests at short context (68/68 passing, up from 63
+-- two new: `kvQuantInt8ExercisesRealAttention`, `kvQuantInt8LogitsCloseToFP32`);
+200-token real-model runs (FP32 path byte-identical to the pre-change
+baseline when reverted via the env var; INT8 path coherent). Then, since
+KV cache is too small a fraction of total footprint at 200 tokens to see
+any memory effect, a real **long-context sweep** at ~20-25K tokens
+(`scratch/kv_quant_long_context_sweep.sh`, FP32 vs INT8, `--cache-gb 2`,
+sequential runs, `footprint` sampled throughout): **+14% decode throughput,
+-20% peak process footprint, no coherence regression**. Full numbers:
+`CONVERSION_PLAN.md` "Long-context sweep". One negative-but-useful finding
+from that sweep: the `--cache-gb` wait/gpu gap above did *not* shrink under
+INT8 at a fixed cache budget -- it's driven by expert-cache traffic, not KV
+size, at least at `--cache-gb 2`.
+
+Existing GPU-vs-CPU-oracle parity tests (`gpuMatchesCPUOnQwen35Tiny`,
+`gpuMatchesCPUOnQuantizedTiny`, `gpuQpackStreamingMatchesCPU`,
+`streamingInstallMatchesRepacker`) now pin `forceKVQuantMode: .off` --
+they assert near-bit-exact parity against the CPU oracle (which stays
+FP32 always) at a `<2e-3` tolerance calibrated for numerically-equivalent
+changes, and INT8 KV quant is the first genuinely lossy change in this
+whole arc, so it needed its own tests at a deliberately looser tolerance
+instead of loosening those.
+
+Not wired into `ExpertCacheMemoryGovernor`'s cache-sizing math -- confirmed
+that path isn't on `swiftlet generate`'s actual route today regardless (see
+`synopsis.md` "Verifying all parts of the port"), so this is a real,
+deliberate scope limit, not an oversight. `ArchConfig.kvBytesPerTokenInt8`
+exists for accounting/future wiring.
