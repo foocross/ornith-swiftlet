@@ -9,6 +9,14 @@ Text-only, K=8 baseline: drops blk.40 (the MTP "nextn" block) and any vision
 tensors (none present in this GGUF; vision lives in the separate mmproj file),
 matching the scope ornith-swiftlet-port's overlay already assumes.
 
+Set `ORNITH_KEEP_MTP_BLOCK=1` to keep blk.40 instead of dropping it (see
+MTP_PASSTHROUGH below and handoff.md "MTP investigation"). Off by default so
+the existing text-only pipeline's output is byte-for-byte unaffected. This
+flag has only been exercised against real block-40 tensor bytes at the
+mapping/shape level (`scratch/test_mtp_block_mapping.py`, no GGUF download
+needed) -- an actual full pipeline run with it on, and mlx_lm.convert's
+handling of the resulting extra `model.layers.40.*` keys, is UNVERIFIED.
+
 Tensor naming: everything is emitted WITHOUT any "language_model."/"model."
 wrapper prefix (flat `model.embed_tokens...`, `model.layers.N...`,
 `lm_head.weight`). mlx_lm's Model.sanitize() fallback branch
@@ -27,6 +35,7 @@ against real tensor values that norm weights are already final-form
 """
 import gc
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -43,6 +52,7 @@ BASE_CONFIG_DIR = Path("ref")  # config.json / tokenizer files pulled from ornit
 SHARD_TARGET_BYTES = 4 * 1024**3  # ~4GB per shard, keeps peak RAM bounded on an 18GB machine
 
 MTP_BLOCK = 40  # confirmed via GGUFReader: blk.40.nextn.* tensors == the MTP draft layer
+KEEP_MTP_BLOCK = os.environ.get("ORNITH_KEEP_MTP_BLOCK") == "1"  # opt-in, see module docstring
 
 # --- GatedDeltaNet value-head reorder ---------------------------------------
 # llama.cpp's GGUF export lays out the 32 value-heads as [16 "primary" heads,
@@ -149,6 +159,22 @@ PASSTHROUGH = {
 }
 # handled specially (shape transform needed): ssm_conv1d.weight, ffn_gate_inp_shexp.weight
 
+# blk.40's own attention+MoE tensors need no entry here: they're the same
+# full-attention-MoE-layer family as blk.39 (verified: every shared suffix's
+# dims/ggml_type matches blk.39's exactly, scratch/gguf_tensor_infos.json),
+# so they resolve through PASSTHROUGH above unchanged. Only the four
+# MTP-specific combination tensors need new names. Naming follows
+# DeepSeek-V3's own published HF checkpoint convention (the architecture
+# match this project already established, see handoff.md "MTP investigation"):
+# the MTP module's combination step keeps the SAME "model.layers.{N}."
+# prefix as an ordinary decoder layer, not a separate top-level module.
+MTP_PASSTHROUGH = {
+    "nextn.eh_proj.weight": "eh_proj.weight",
+    "nextn.enorm.weight": "enorm.weight",
+    "nextn.hnorm.weight": "hnorm.weight",
+    "nextn.shared_head_norm.weight": "shared_head.norm.weight",
+}
+
 TOP_LEVEL = {
     "token_embd.weight": "model.embed_tokens.weight",
     "output_norm.weight": "model.norm.weight",
@@ -156,16 +182,25 @@ TOP_LEVEL = {
 }
 
 
-def target_key(gguf_name: str) -> str | None:
+def target_key(gguf_name: str, keep_mtp: bool = KEEP_MTP_BLOCK) -> str | None:
+    """Resolve a GGUF tensor name to its output safetensors key, or None to
+    skip it (only ever blk.40 when `keep_mtp` is False). Raises ValueError
+    for anything genuinely unmapped -- fail loud, don't silently drop, same
+    discipline as every other tensor-naming decision in this project."""
     m = re.match(r"^blk\.(\d+)\.(.+)$", gguf_name)
     if not m:
-        return TOP_LEVEL.get(gguf_name)
-    layer = int(m.group(1))
-    if layer == MTP_BLOCK:
+        if gguf_name not in TOP_LEVEL:
+            raise ValueError(f"unmapped top-level tensor: {gguf_name}")
+        return TOP_LEVEL[gguf_name]
+    layer, suffix = int(m.group(1)), m.group(2)
+    if layer == MTP_BLOCK and not keep_mtp:
         return None
-    suffix = m.group(2)
-    if suffix == "ssm_conv1d.weight" or suffix in PASSTHROUGH:
-        return f"model.layers.{layer}.__SUFFIX__"  # resolved by caller (needs suffix separately)
+    if suffix == "ssm_conv1d.weight":
+        return f"model.layers.{layer}.linear_attn.conv1d.weight"
+    if suffix in PASSTHROUGH:
+        return f"model.layers.{layer}.{PASSTHROUGH[suffix]}"
+    if layer == MTP_BLOCK and suffix in MTP_PASSTHROUGH:
+        return f"model.layers.{layer}.{MTP_PASSTHROUGH[suffix]}"
     raise ValueError(f"unmapped tensor: {gguf_name}")
 
 
@@ -199,22 +234,12 @@ def main():
     for i, t in enumerate(tensors):
         name = t.name
         m = re.match(r"^blk\.(\d+)\.(.+)$", name)
-        if m and int(m.group(1)) == MTP_BLOCK:
+
+        out_key = target_key(name, keep_mtp=KEEP_MTP_BLOCK)
+        if out_key is None:
             skipped_mtp += 1
             continue
-
-        if m:
-            layer, suffix = int(m.group(1)), m.group(2)
-            if suffix == "ssm_conv1d.weight":
-                out_key = f"model.layers.{layer}.linear_attn.conv1d.weight"
-            elif suffix in PASSTHROUGH:
-                out_key = f"model.layers.{layer}.{PASSTHROUGH[suffix]}"
-            else:
-                raise ValueError(f"unmapped tensor: {name}")
-        else:
-            if name not in TOP_LEVEL:
-                raise ValueError(f"unmapped top-level tensor: {name}")
-            out_key = TOP_LEVEL[name]
+        suffix = m.group(2) if m else None
 
         arr = dequantize(t.data, t.tensor_type).astype(np.float32)
 

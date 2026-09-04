@@ -1,0 +1,54 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/opt/miniconda3/lib/python3.13/site-packages/mlx_lm/__main__.py", line 6, in <module>
+    cli.main()
+    ~~~~~~~~^^
+  File "/opt/miniconda3/lib/python3.13/site-packages/mlx_lm/cli.py", line 40, in main
+    submodule.main()
+    ~~~~~~~~~~~~~~^^
+  File "/opt/miniconda3/lib/python3.13/site-packages/mlx_lm/convert.py", line 259, in main
+    convert(**vars(args))
+    ~~~~~~~^^^^^^^^^^^^^^
+  File "/opt/miniconda3/lib/python3.13/site-packages/mlx_lm/convert.py", line 112, in convert
+    model, tokenizer, config = load(
+                               ~~~~^
+        hf_path,
+        ^^^^^^^^
+    ...<3 lines>...
+        lazy=True,
+        ^^^^^^^^^^
+    )
+    ^
+  File "/opt/miniconda3/lib/python3.13/site-packages/mlx_lm/utils.py", line 491, in load
+    model, config = load_model(model_path, lazy, model_config=model_config)
+                    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/miniconda3/lib/python3.13/site-packages/mlx_lm/utils.py", line 415, in load_model
+    model.load_weights(list(weights.items()), strict=strict)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/miniconda3/lib/python3.13/site-packages/mlx/nn/layers/base.py", line 185, in load_weights
+    raise ValueError(
+        f"Received {num_extra} parameters not in model: \n{extras}."
+    )
+ValueError: Received 20 parameters not in model: 
+language_model.model.layers.40.eh_proj.weight,
+language_model.model.layers.40.enorm.weight,
+language_model.model.layers.40.hnorm.weight,
+language_model.model.layers.40.input_layernorm.weight,
+language_model.model.layers.40.mlp.gate.weight,
+language_model.model.layers.40.mlp.shared_expert.down_proj.weight,
+language_model.model.layers.40.mlp.shared_expert.gate_proj.weight,
+language_model.model.layers.40.mlp.shared_expert.up_proj.weight,
+language_model.model.layers.40.mlp.shared_expert_gate.weight,
+language_model.model.layers.40.mlp.switch_mlp.down_proj.weight,
+language_model.model.layers.40.mlp.switch_mlp.gate_proj.weight,
+language_model.model.layers.40.mlp.switch_mlp.up_proj.weight,
+language_model.model.layers.40.post_attention_layernorm.weight,
+language_model.model.layers.40.self_attn.k_norm.weight,
+language_model.model.layers.40.self_attn.k_proj.weight,
+language_model.model.layers.40.self_attn.o_proj.weight,
+language_model.model.layers.40.self_attn.q_norm.weight,
+language_model.model.layers.40.self_attn.q_proj.weight,
+language_model.model.layers.40.self_attn.v_proj.weight,
+language_model.model.layers.40.shared_head.norm.weight.
+[INFO] Loading

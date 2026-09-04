@@ -1,0 +1,77 @@
+planning 4 shard(s)
+expert blob payload 1769472 B, stride 1769472 B
+model-00001-of-00004.safetensors: streaming from byte 0 of 5343699466
+  model-00001-of-00004.safetensors 5%
+  model-00001-of-00004.safetensors 10%
+  model-00001-of-00004.safetensors 15%
+  model-00001-of-00004.safetensors 20%
+  model-00001-of-00004.safetensors 25%
+  model-00001-of-00004.safetensors 30%
+  model-00001-of-00004.safetensors 35%
+  model-00001-of-00004.safetensors 40%
+  model-00001-of-00004.safetensors 45%
+  model-00001-of-00004.safetensors 50%
+  model-00001-of-00004.safetensors 55%
+  model-00001-of-00004.safetensors 60%
+  model-00001-of-00004.safetensors 65%
+  model-00001-of-00004.safetensors 70%
+  model-00001-of-00004.safetensors 75%
+  model-00001-of-00004.safetensors 80%
+  model-00001-of-00004.safetensors 85%
+  model-00001-of-00004.safetensors 90%
+  model-00001-of-00004.safetensors 95%
+model-00002-of-00004.safetensors: streaming from byte 0 of 5368472837
+  model-00002-of-00004.safetensors 5%
+  model-00002-of-00004.safetensors 10%
+  model-00002-of-00004.safetensors 15%
+  model-00002-of-00004.safetensors 20%
+  model-00002-of-00004.safetensors 25%
+  model-00002-of-00004.safetensors 30%
+  model-00002-of-00004.safetensors 35%
+  model-00002-of-00004.safetensors 40%
+  model-00002-of-00004.safetensors 45%
+  model-00002-of-00004.safetensors 50%
+  model-00002-of-00004.safetensors 55%
+  model-00002-of-00004.safetensors 60%
+  model-00002-of-00004.safetensors 65%
+  model-00002-of-00004.safetensors 70%
+  model-00002-of-00004.safetensors 75%
+  model-00002-of-00004.safetensors 80%
+  model-00002-of-00004.safetensors 85%
+  model-00002-of-00004.safetensors 90%
+  model-00002-of-00004.safetensors 95%
+model-00003-of-00004.safetensors: streaming from byte 0 of 5368324245
+  model-00003-of-00004.safetensors 5%
+  model-00003-of-00004.safetensors 10%
+  model-00003-of-00004.safetensors 15%
+  model-00003-of-00004.safetensors 20%
+  model-00003-of-00004.safetensors 25%
+  model-00003-of-00004.safetensors 30%
+  model-00003-of-00004.safetensors 35%
+  model-00003-of-00004.safetensors 40%
+  model-00003-of-00004.safetensors 45%
+  model-00003-of-00004.safetensors 50%
+  model-00003-of-00004.safetensors 55%
+  model-00003-of-00004.safetensors 60%
+  model-00003-of-00004.safetensors 65%
+  model-00003-of-00004.safetensors 70%
+  model-00003-of-00004.safetensors 75%
+  model-00003-of-00004.safetensors 80%
+  model-00003-of-00004.safetensors 85%
+  model-00003-of-00004.safetensors 90%
+  model-00003-of-00004.safetensors 95%
+model-00004-of-00004.safetensors: streaming from byte 0 of 3428527653
+  model-00004-of-00004.safetensors 8%
+  model-00004-of-00004.safetensors 16%
+  model-00004-of-00004.safetensors 23%
+  model-00004-of-00004.safetensors 31%
+  model-00004-of-00004.safetensors 39%
+  model-00004-of-00004.safetensors 47%
+  model-00004-of-00004.safetensors 55%
+  model-00004-of-00004.safetensors 63%
+  model-00004-of-00004.safetensors 70%
+  model-00004-of-00004.safetensors 78%
+  model-00004-of-00004.safetensors 86%
+  model-00004-of-00004.safetensors 94%
+container complete at /Users/hoahoa/code/ai/orninth/scratch/ornith-1.5-35b-base.qpack
+done in 547.7s

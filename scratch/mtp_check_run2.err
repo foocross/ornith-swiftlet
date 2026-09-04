@@ -1,0 +1,9 @@
+loading tokenizer + model...
+mtpSanityCheck: candidate=760 (real argmax) -> draft top=1156 (logit 4.974), range=[-6.470, 4.974] mean=-1.9936 nan=no inf=no
+prefill S3a: 21 tok wall=1.947s wait=1.309s/1071 cb=1071 err=0 dispatch=19511 lm=1 skip=20 gpu=1.031s/1071 timed/0 n/a
+prefill expert cache: 5215 hits / 1513 misses (78% hit rate), fill 0.298s of 1.947s prefill wall
+decode: 5 tokens in 0.5s (9.76 tok/s)
+decode Metal S3a: steps=5 cb=255 err=0 wait=0.261s/255 dispatch=4655 gpu=0.200s/255 timed/0 n/a
+expert cache: 1213 slots (2.0 GB), 6297 hits / 2031 misses (76% hit rate) [cumulative, prefill+decode]
+decode expert cache: 1082 hits / 518 misses (68% hit rate), fill 0.152s (0.294ms/miss avg, 4.697ms max), bookkeeping 0.004s of 0.5s decode wall
+decode loop overhead: argmax 0.001s, text-decode 0.000s of 0.5s decode wall

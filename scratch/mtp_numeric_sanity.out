@@ -1,0 +1,6 @@
+blk.40.attn_norm.weight: shape=(2048,) n=2048 mean=1.0001 std=0.0030 min=0.9896 max=1.0115 nan=0 inf=0
+blk.40.nextn.eh_proj.weight: shape=(2048, 4096) n=8388608 mean=-0.0000 std=0.0195 min=-0.1074 max=0.1015 nan=0 inf=0
+blk.40.nextn.enorm.weight: shape=(2048,) n=2048 mean=0.9787 std=0.0010 min=0.9777 max=0.9910 nan=0 inf=0
+blk.40.nextn.hnorm.weight: shape=(2048,) n=2048 mean=1.0157 std=0.0056 min=0.9819 max=1.0215 nan=0 inf=0
+blk.40.nextn.shared_head_norm.weight: shape=(2048,) n=2048 mean=1.0228 std=0.0002 min=1.0219 max=1.0231 nan=0 inf=0
+blk.40.post_attention_norm.weight: shape=(2048,) n=2048 mean=1.0148 std=0.0036 min=1.0056 max=1.0215 nan=0 inf=0
