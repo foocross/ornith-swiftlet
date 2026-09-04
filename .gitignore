@@ -15,6 +15,8 @@ scratch/*.qpack
 scratch/*.gguf
 scratch/downloads/
 scratch/ref/
+scratch/hf-checkpoint/
+scratch/mlx-checkpoint/
 
 # Claude Code local session settings (machine-specific, not shared config)
 .claude/settings.local.json
