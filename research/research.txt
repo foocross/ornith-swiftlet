@@ -1,0 +1,82 @@
+Prioritized by impact-per-effort for your bottleneck profile (46% of decode was expert-fill before, now ∼22.9s decode at --cache-gb 2 with a growing GPU wait-minus-exec gap).
+1. INT4 / INT8 KV cache quantization for the 10 full-attention layers — [BOTH, but huge MEMORY win]
+What: Quantize only the growing KV cache (10/40 layers), leave GatedDeltaNet state FP32. Use asymmetric per-channel Keys / per-token Values, group 128.
+Mechanism: Your only O(context) cost is the CPU-side full-attention QK^T + softmax-weighted V sum. Today that KV is 1.25 GiB at 32K FP32. INT4 cuts it to ∼156 MiB, INT8 to ∼312 MiB. It also cuts the bandwidth for that CPU path.
+Expected impact:
+Memory: 4-6x KV compression with near-lossless quality. TurboQuant reports 3-bit keys / 2-bit values with QJL correction achieves cos_sim 0.94-0.997 vs FP16, 4-bit is reliably lossless across models and 0.949-0.997 cosine at 4-bit in MLX benchmarks. 4-bit KV cache shows 3.6-3.8x measured compression in MLX. Google's paper claims 4-bit TurboQuant up to 6x cut and 8x attention-logit speedup on H100. 
+Quality: KIVI-style papers show INT4 PPL delta 0.05-0.2. 
+Effort in Swift/Metal: Low-medium. You already have a quantized_matmul dequant kernel. KV cache quant is just per-group scale+bias + bit-packing for K,V. No retrain. Implement a QuantizedKVCache: quantize on write, dequant on read inside your cblas_sgemv path, or fused dequant+SGEMV in Metal. Risk: quality drift on long context - verify with your byte-identical convention using cosine similarity, not just PPL.
+Citations: KIVI/INT4 overhead discussion, TurboQuant quality/memo, TurboQuant 8x speedup claim 
+2. 3-bit / mixed-precision expert weights + DMA alignment — [BOTH, SPEED primary]
+What: Go from uniform 4-bit group-64 to 3-bit group-64 for routed experts, or mixed 3-bit cold / 4-bit hot experts. Plus fix DMA buffer alignment.
+Mechanism: Your expert blocks are ∼17 MB per token at 4-bit. 3-bit is 25% smaller IO = directly 25% less pread. MLX already has group_size=32 penalty largely resolved in 0.31.2 (prefill 2.2x → 1.0x, gen 7-14% → ∼4% avg) so you can safely use g64/g32 without the old 2x prefill trap. Newer methods: GEMQ joint 2-4 bit mixed precision with group-64 achieves <3-bit avg with better quality than uniform 3-bit. BitsMoE: 2-bit MoE with residual compensation matches 4-bit quality and 20% less memory than 2-bit. 
+Expected impact: 25-44% smaller files. Flash-MoE reports 2-bit expert requant 44% size reduction, reduced expert_io 2.6ms → 1.5ms per layer. 3-bit alone ∼22% IO saving. With your 46% fill time, that's ∼5-10% end-to-end even after your concurrent fill win. 
+Second-order: aligned buffers. Flash-MoE measured 2MB-aligned posix_memalign + newBufferWithBytesNoCopy = 16.8 GB/s vs 4.7 GB/s for 16KB-aligned Metal buffers - 3.6x faster DMA for warm cache. In full pipeline +5% expert_io. 
+Effort: Medium. You need a 3-bit dequant kernel (nibble unpack with LUT) - you already have 4-bit affine. Risk: quality - need calibration. Mixed-precision assignment can be data-free via sensitivity (MINT framework noted in MLX issue). 
+3. Router-aware expert prefetch beyond reactive miss — [SPEED]
+What: Predict layer N+1 experts from layer N hidden state before layer N router finishes, start disk reads early.
+Mechanism: Your pipeline already defers MoE compute to N+1 command buffer but fill can't start until router GEMV finishes (true dependency). SOTA systems:
+FineMoE: expert map (iteration-level probability distribution) + semantic embeddings to guide prefetch, +39% hit rate, -47% latency vs LRU/LFU 
+MoEpic: split expert into top/bottom segments, cache top segments of hot experts to increase resident count, prefetch bottom segments 
+AdapMoE / Pre-gated MoE / SiDA: learned predictor or hash-based selection enabling early prediction, ProMoE stride-based speculative prefetch 
+SP-MoE: speculative expert prefetching exploiting draft/target correspondence + cutoff-layer policy + pipelined runtime with async prefetch threads and batched I/O 
+FlashMoE ML cache: adaptive recency/frequency ML cache: 51% better hit than LRU/LFU, 2.6x speedup 
+Your "GPU wait-minus-exec" gap growing with cache size (2.76s → 4.83s) matches the flash-moe observation that Metal buffer caches wire memory, causing compressor thrashing (60k-130k decompressions/sec vs near zero without cache). Prefetch overlapping would hide that. 
+Expected impact: Mixtral-offloading LRU cache 35-44% hit rate at 500-1000 slots. FineMoE +39% hit. For your 55-60% baseline, even +15% absolute hit saves ∼15% of remaining fill time. 
+Effort: Medium-high. Simplest: use hidden state h^i to run a tiny 2-layer MLP predicting next layer top-8 (train offline on 10k tokens of router traces). More complex: implement MoEpic split (requires re-packing qpack). Risk: misprediction wastes SSD bandwidth - need cutoff policy like SP-MoE.
+4. Fix SSD IO path + instrument memory pressure hypothesis — [SPEED]
+What: Your --cache-gb 2→8 anomaly (hit 60%→90% but wall 22.9s→21.9s) is unexplained. The abbaglio paper gives exact tools.
+Mechanism: Two findings from from-scratch Metal engines on Apple Silicon:
+UBC vnode-lock serialization: F_NOCACHE bypass proves 4x parallelism collapse in concurrent pread, but is non-dominant because overlap hides it. Every macOS IO hint tested (F_NOCACHE +3%, F_RDAHEAD 0%, F_RDADVISE -8% due to NVMe contention) - default is best 
+Dispatch-group overlap effective: ∼82% of SSD read time hides behind GPU attention kernel 
+Trust OS page cache vs custom Metal LRU: Deleting 9.8GB Metal LRU cache improved throughput 38% (5.74 vs 2.24 tok/s) because Metal buffers are wired, squeezing OS CLOCK-Pro cache 
+Your current heap LFU cache is exactly the anti-pattern they removed. Your gap growth suggests wired memory pressure.
+Expected impact: If you remove wired Metal cache and trust OS + pread with dispatch_group, abbaglio reports 611 MB dirty footprint vs MLX 12 GB and 2.84 vs 4.15 tok/s (32% slower but jetsam-invisible). For your case, it may eliminate the 2.76→4.83s wait gap entirely, making --cache-gb 8 actually help. 
+Effort: Low. Add vm_stat / footprint -p logging during decode, test fcntl(F_NOCACHE) vs default with your concurrent width sweep, test posix_memalign 2MB alignment for MTLBuffers. No correctness risk.
+5. Prefix caching with recurrent-state checkpointing — [SPEED for agentic workloads]
+What: Cache KV + GatedDeltaNet state per prefix across independent requests, using radix tree (SGLang RadixAttention).
+Mechanism: SGLang's RadixAttention retains KV for both prompts and generation results in a radix tree, LRU eviction, paged layout, achieving up to 5x throughput vs vLLM/Guidance. For you, a prefix is cheap: 63 MiB GDN state + 1.25 GiB KV at 32K per 10 layers, but system prompts are typically <2K tokens (∼78 MiB KV INT4). Copying 63 MiB via blit encoder is <0.1ms. 
+Your current server only reuses same-conversation continuations. For tool-calling agents with repeated system prompts, this is huge.
+Expected impact: Up to 5x throughput in SGLang benchmarks for prefix-heavy workloads. For typical agentic loop (2K system + 200 new tokens), you save ∼90% of prefill. 
+Effort: Low-medium server layer. Hash prefix tokens, store (GDN state buffers + KV buffers) in dictionary. No kernel changes. Verifiable byte-identical.
+6. Speculative decoding for hybrid GatedDeltaNet+MoE via state checkpoint/restore — [SPEED]
+What: Your MTP head exists, blocked by "how to rollback GDN recurrent state". Answer: checkpoint/restore, now proven in production.
+Mechanism: KV cache rollback is truncate. GDN/Mamba state is recurrent and irreversible - you cannot subtract a token. Three independent fixes in last 12 months:
+mlx-swift-lm: checkpoint-based rollback on MambaCache (recurrent state cannot be trimmed like attention KV caches) + StateReplayCache protocol shared by Mamba2, GatedDeltaNet, RWKV 
+lemonade-sdk: synchronize MambaCache with KV cache during MTP rollback - conv_state + ssm_state must rollback or output collapses into degenerate loop 
+speedycolibri: MTP rollback of Mamba2 recurrent state (∼166 MiB/seq) - on partial accept attention KV self-heals but Mamba state was never rolled back so every step after rejection ran from corrupted state
+vLLM RFC: ReplaySSM - cache SSM inputs instead of state, per-position checkpoints to roll back to last accepted token without re-running, plus GDNv3 kernel emitting one checkpoint per token position for MTP rollback 
+For you: 63 MiB fixed-size state. Before speculative window, blit copy to checkpoint buffer. On reject, blit restore. Cost: 63 MiB copy ∼0.05ms, negligible vs 17 MB expert load.
+Self-speculative without drafter: prompt lookup decoding, lookahead decoding, ngram speculative all work with no training and are compatible with checkpointing.
+Expected impact: Mixtral 8x7B 1.5-3.5x speedup with SD. SP-MoE 1.07-3.5x TPOT speedup over SOTA offloading. Even 2-token accept rate 0.6 gives 1.3x. 
+Effort: Medium. Need to implement: (a) GDN state checkpoint buffers per layer (copy via MTLBlitCommandEncoder), (b) speculative decode loop that verifies N drafts in parallel (your batched-GEMV MoE kernel already supports batched tokens - extend to N tokens), (c) rollback on reject. Risk: correctness - must verify state equality after rollback.
+Constraint: Does NOT need retraining if you use prompt-lookup / ngram draft. Your own MTP head would need training, which you ruled out, so use self-speculative first.
+7. Continuous/concurrent batching with shared expert cache — [THROUGHPUT]
+What: Serve multiple requests against single resident expert cache.
+Mechanism: vLLM-mlx and SGLang ship continuous batching + paged KV + prefix sharing. For MoE, shared cache benefits: different requests often activate overlapping experts, raising effective hit rate above single-request 55-60%. Per-request cost: GDN state 63 MiB + KV 1.25 GiB at 32K + scratch. With 18 GB total, 2 concurrent 32K requests = ∼2.6 GiB KV + 0.13 GiB GDN + 1.3 GiB dense + 2 GiB cache budget = ∼6 GiB, feasible. vLLM's PagedAttention + RadixAttention is compatible with continuous batching. 
+Expected impact: 2x throughput at same latency for 2 concurrent users if expert overlap high. For agentic workloads, even higher due to prefix sharing.
+Effort: High. Your server has shared mutable conversation state. Need to refactor to per-request state objects + shared cache with atomic refcount. No kernel changes, but significant Swift concurrency risk.
+8. Offline expert pruning/merging — [BOTH]
+What: Shrink total pool 10,240 → ∼7,680 (25% cut) post-hoc.
+Mechanism:
+UNCURL: unified clustering based on router logits, spectral clustering on expert similarity matrix, then merge. Finds threshold pruning factor dependent on pretrain expert count beyond which quality degrades. 
+ConMoE: train-free prototype remapping, selects retained experts via contribution/replaceability, redirects original references to retained pool, best avg score at 25% and 50% reduction on deepseek-moe-16b. 
+REAP: router-weighted expert saliency - pruning beats merging (merging causes functional subspace collapse) 
+Also NAEE evaluating expert combos on calibration set, PEMPE, SEER-MoE heavy-hitters counting. 
+Expected impact: 25% reduction → disk footprint 43.5GB→∼32GB, cache hit 55%→∼70% at same --cache-gb budget (since slots cover more of total). Quality cost typically 1-3% on MMLU for 25% pruning, 5-10% for 50% per ConMoE results.
+Effort: Low runtime, high offline. Requires Python + calibration data to compute router logits similarity, then re-pack qpack without pruned experts. No retrain, but violates "no recalibration" if you consider clustering as calibration - you said offline pruning is allowed if no retrain. Risk: quality - need eval harness.
+9. Apple-Silicon-specific dead ends and micro-optimizations — [LOW]
+What: ANE, MPS Graph, MTLHeap, page size, hazardTracking.
+Mechanism & verdict:
+ANE: CoreML/ANE path 4.5x slower than Metal for LLM - GPU 89 tok/s vs ANE 20 tok/s best case, Float16 ANE 5 tok/s. ANE lacks custom ops, needs CoreML MIL, private _ANEClient APIs reverse-engineered. Not feasible for custom GatedDeltaNet recurrence + MoE gather. 
+MPS Graph vs hand-written: MLX's gather_qmm / gather_mm fused gather+matmul for MoE already exists, plus fused_swiglu_gather_qmv single kernel fusing silu(gate)*up with quantized gather_qmm. Your 38→9 dispatch fusion is similar. MPS Graph unlikely to beat hand-tuned simdgroup reductions with threadgroup shared memory x_shared[4096] L1 hit 93.4%. 
+Unified memory: Page size fixed 16KB on Apple Silicon, storageModeShared is correct. MTLHeap could reduce allocation overhead for 10k expert slots but won't fix your wait gap - you already tested hazardTrackingModeUntracked and it made it worse. 
+Remaining: 2MB-aligned buffers (see #2), newBufferWithBytesNoCopy zero-copy wrapping, and using MTLResourceOptions cache modes already covered.
+Effort: Low for heap/ alignment, High for ANE (and blocked). ANE would violate your "plain Swift+Metal" if it required CoreML.
+Suggested order to implement:
+Instrument vm_stat + footprint -p during --cache-gb 2/4/8 run to confirm memory pressure theory - 1 day, explains anomaly.
+INT4 KV cache - 2-3 days, immediate 1 GiB memory back, longer context.
+Prefix caching with GDN checkpoint - 1 day server layer, huge for agents.
+2MB-aligned DMA buffers + trust OS page cache experiment (delete Metal LRU cache, keep LFU+recency as OS advisory via F_RDADVISE) - 2 days, tests your gap theory.
+Router-aware prefetch MLP - 1 week, biggest speed potential.
+Speculative decoding with checkpoint/restore - 2 weeks, needs careful verification.
