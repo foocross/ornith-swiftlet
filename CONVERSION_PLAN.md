@@ -590,6 +590,65 @@ Idea #4 is now closed: instrumented, mechanism confirmed, a real fix shipped
 for the shipped default, the rest of its scope explicitly declined with
 reasoning rather than left silently undone.
 
+### `F_NOCACHE` default reverted (2026-09-03)
+
+Surfaced while investigating why this session's decode throughput
+(measured while building/verifying router-aware expert prefetch, above)
+kept coming in at ~3.5-4 tok/s at `--cache-gb 2` -- roughly a third of the
+~11.17 tok/s documented earlier in this file, on the same qpack, same
+`--cache-gb`, same machine. Ruled out in order: thermal throttling
+(`pmset -g therm` reported none), a stray 17-hour-old orphaned
+`swiftlet-server` process holding ~1.1GB of GPU memory (killed; didn't
+meaningfully help), and router-aware expert prefetch itself (`git stash` +
+rebuild + retest the exact pre-session commit, `af84f89`, reproduced the
+same ~3.6 tok/s with none of this session's changes present -- see the
+"Router-aware expert prefetch" section's own note on this).
+
+Going back one more commit (`d0737dd`, the state immediately before
+`F_NOCACHE` shipped) recovered **11.09 tok/s** -- matching the documented
+baseline almost exactly, on this same machine, minutes apart from the 3.6
+tok/s measurement. `SWIFTLET_EXPERT_NOCACHE=0` on the *current* code
+(reverting just that one hint, keeping everything else including
+prefetch) confirmed it directly: **11.53 tok/s with the hint off, 3.63
+tok/s with it on** -- a ~3x regression from one `fcntl` call, fully
+reproducible, byte-identical output either way. At `--cache-gb 8` the gap
+is smaller but still favors off (9.85 vs 7.93), where the original sweep
+above had only found a small ~2-4% regression for having it on.
+
+This isn't a new mechanism, and the original measurement wasn't sloppy --
+that sweep already recorded one discarded `--cache-gb 2` run that went
+the *opposite* direction ("a cold-start/noise outlier," "the following
+three repeats were tight and consistent, so that first run was
+discarded") that in hindsight may have been this same effect rather than
+noise. `F_NOCACHE`'s cost/benefit is real but conditional: it avoids
+double-caching hot expert blobs in both the OS page cache and
+`ExpertCache`'s own resident buffers (a real win when the underlying disk
+read is cheap), but forces every miss to hit real storage with no OS
+page-cache cushion -- if whatever is happening on this machine right now
+makes real I/O more expensive than when the original sweep ran, that
+cushion is worth far more than the double-caching pressure it costs. Root
+cause of *why* this machine's I/O got more expensive between then and now
+was not tracked down (candidates not individually ruled out: other
+long-running processes' cumulative disk/memory pressure -- an MLX server
+process with 11 days of uptime and ~3.6GB resident was noted but not
+tested in isolation, since pausing other users' processes to test was
+correctly blocked by the permission system -- SSD state, or something
+about this specific machine's aging).
+
+**Reverted to default off** (`Qpack.swift`'s `nocacheHint`,
+`SWIFTLET_EXPERT_NOCACHE=1` now opts back in) given a clean, reproducible,
+large, byte-identical-output-confirmed win in the *current* environment,
+following this project's standing rule of trusting a real measurement
+over a previous real measurement's now-stale conclusion. Full `swift
+test` suite (75 tests) still passes; the new default was verified with a
+real run showing the fast path engaged with no environment variables set,
+and `SWIFTLET_EXPERT_NOCACHE=1` reproducing the old (slow, on this
+machine) path exactly. Worth re-sweeping properly (3 clean repeats,
+`--cache-gb` 2/4/6/8) the next time this machine is quiet, since this
+session's numbers -- both directions -- came from a handful of runs under
+conditions that were never fully characterized, not the disciplined sweep
+the original `F_NOCACHE` default was shipped on.
+
 ## Base model build: direct, no GGUF conversion needed
 
 Everything above is specific to the CRACK build, which started from a GGUF
@@ -882,3 +941,169 @@ with less isolation). Ranked behind `research/research.txt` ideas #5
 (prefix caching) and #6 (speculative decoding via GDN state
 checkpoint/restore), both lower-effort and closing gaps this project's own
 docs already flagged as open.
+
+## Router-aware expert prefetch (`research/research.txt` idea #3)
+
+Today's expert-cache fill (`ExpertCache.buffers`) is purely reactive: layer
+`li`'s router GEMV must finish (its output, `reg.rout`, depends on `li`'s
+full attn/delta transform) before the CPU knows which experts to fetch,
+and the fetch itself is synchronous, fully idling the GPU while it runs.
+An earlier session already investigated and rejected the more aggressive
+version of "overlap the fill with GPU work" (layer N's fill running
+alongside layer N+1's GPU dispatch) because layer N+1's first op has a
+**true data dependency** on `hBuf`, written by layer N's own deferred MoE
+output inside layer N+1's command buffer -- see "fast-path fill/GPU-
+dispatch overlap that wasn't" above.
+
+Router-aware prefetch routes around that exact dependency: instead of
+needing layer N's real MoE output, predict layer N+1's picks from layer
+N's own `xmoe` (already computed, no dependency on N's MoE at all) run
+through layer N+1's **real** router weight -- only the input is an
+approximation (N's xmoe standing in for N+1's own), the weight is exact.
+Wrong guesses are cheap: a mis-prefetched cache slot has `freq == 1` and is
+first in line for the existing LFU eviction, so the cost is bounded and
+self-correcting, and (this is the key property) the *real*, authoritative
+fetch is completely untouched by the prediction -- misprediction can only
+waste bandwidth, never change generated output.
+
+**Phase 0 (measurement only, no ExpertCache/generation changes)**: added
+one extra `encodeGemv` per layer (`layers[li+1].moe.gate` against `li`'s
+`reg.xmoe`, into a new scratch region `reg.routNext`) to the same encoder
+that already produces that layer's real router output -- no new command
+buffer, no new CPU/GPU sync point. Gated entirely behind
+`SWIFTLET_PREFETCH_DEBUG=1` (an instance property read once at init, same
+shape as `moeBatchEligible`/`kvQuantMode`; zero cost when unset). Verified
+in `MetalModelTests.swift`
+(`prefetchDebugMatchesBaselineAndProducesSaneStats`) that turning this on
+produces byte-identical logits to it off -- the predictor's output is
+provably inert to real generation, since it only ever writes to a disjoint
+scratch offset nothing else reads.
+
+Measured against the real model (`scratch/ornith-1.5-35b-base.qpack`,
+`--cache-gb 2`, 150 new tokens, two unrelated prompts):
+
+| Prompt | Layer-transitions | hit@K (top-8) | hit@wideK (top-16) |
+|---|---|---|---|
+| MoE explainer | 6,981 | 44,495/55,848 (**79.7%**) | 52,584/55,848 (**94.2%**) |
+| Linked-list reversal | 6,825 | 42,996/54,600 (**78.7%**) | 50,962/54,600 (**93.3%**) |
+
+Chance level is `8/256 ≈ 3%`; the current reactive-fill cache hit rate is
+~55%. A zero-training, zero-calibration heuristic (real router weight, one
+layer's residual-stream continuity as the only approximation) landing
+~79% hit@K and ~94% hit@wideK clears the decision gate by a wide margin --
+proceeding to Phase 1 (thread-safe `ExpertCache.prefetch()`, wired into
+`stepOneFast`, gated behind `SWIFTLET_EXPERT_PREFETCH`, default off until
+A/B'd).
+
+### Phase 1: real prefetch, now the default
+
+`ExpertCache` went from a single-caller-thread design (`buffers()` alone,
+no locking) to one where a background `prefetch()` and the real,
+synchronous `buffers()` share slot bookkeeping under a new
+`bookkeepingLock`, with per-slot in-flight-fill tracking (`inFlight:
+[Int: DispatchGroup]`) so a caller that resolves to a slot another caller
+is still filling waits on that fill rather than trusting a partially-
+written buffer. Both callers go through the same `resolve()` pass --
+prefetch fully respects the existing slot budget and LFU eviction policy,
+so a wrong guess costs at most one eviction cycle (a mis-prefetched slot
+starts at `freq == 1`, first in line for the next real eviction). The
+*real* fetch (`buffers()`) is otherwise untouched: what gets used for
+compute is always driven by the real, exact router output, so prefetch
+can only waste bandwidth, never change generated output. `stepOneFast`
+fires `cache.prefetch(layer: li+1, experts: predictedPicks)` right after
+resolving layer `li`'s own real picks -- its I/O then overlaps with
+`li+1`'s own dense/attn/delta GPU dispatch, previously idle CPU-wait time.
+
+Correctness caught one real bug along the way, in the tests written to
+prove there wasn't one: the initial version incremented the three
+`prefetch*` diagnostic counters (`prefetchIssued` etc.) unlocked, on the
+assumption `prefetch()` is only ever called from one thread. A dedicated
+adversarial stress test (many concurrent `prefetch()` drivers flooding a
+16-slot cache, `ExpertCacheTests.floodedPrefetchNeverProducesATornRead`)
+hit a real lost-update race on that unlocked `Int +=` (`prefetchIssued`
+short by 2 out of 600 on a bad run). Fixed by moving all counter
+increments (`hits`/`misses` too, for the same latent reason) inside
+`resolve()`'s locked section -- `ExpertCache` is now genuinely
+`@unchecked Sendable`, not just asserted so. No torn/corrupted *content*
+read was ever observed at any point in ~80 stress-test repeats (25 + 30
+clean, plus ad hoc reruns) once that counter race was fixed -- the
+locking/in-flight-tracking design for the actual buffer contents was
+right from the start; only the bookkeeping counters needed the fix.
+`ExpertCacheTests.swift` (new) covers: exact content correctness with a
+generous budget, "prefetch warms a slot, the matching real fetch sees a
+hit not a re-fetch," a realistic paired prefetch+immediate-fetch race
+(exact content match expected), and the adversarial flood (only "never a
+torn read" asserted there, since legitimate eviction under that much
+concurrent pressure can validly swap in a different valid key -- verified
+via membership in the full precomputed set of valid blobs, not identity
+with the originally-requested key).
+
+Verified end-to-end: `MetalModelTests.expertPrefetchMatchesBaselineByteIdentical`
+runs the real qpack + ExpertCache path (`--cache-gb` 0.05 fixture-scale
+budget, forcing genuine hit/miss/eviction activity) with
+`forceExpertPrefetch` true vs. false and asserts zero logit diff -- holds
+as a strict equality, not a tolerance, since prefetch is designed to be
+provably inert to what's used for compute. Confirmed again against the
+real model with a manual CLI transcript diff (`swiftlet generate
+scratch/ornith-1.5-35b-base.qpack --cache-gb 2 --max-new 150`, same
+prompt, `SWIFTLET_EXPERT_PREFETCH=0` vs `=1`): byte-identical output.
+
+A/B throughput (`scratch/expert_prefetch_sweep.sh`, real model, 3 clean
+repeats per cell):
+
+| `--cache-gb` | hit rate off → on | tok/s off → on | delta |
+|---|---|---|---|
+| 2 | 55% → 71% | 3.81 → 3.99 | +4.7% |
+| 4 | 77% → 85% | 4.45 → 4.98 | +11.9% |
+| 6 | 88% → 93% | 5.90 → 7.44 | **+26.0%** |
+
+The win *grows* with cache size instead of shrinking -- the opposite
+shape from the earlier-documented "`--cache-gb` gap" (hit-rate gains from
+a bigger cache alone barely moving decode wall, "Decode throughput"
+section above). Read together, the likely story: raising `--cache-gb`
+alone grows the resident-slot working set faster than it reduces real
+stall time (the gap that was never fully explained -- memory pressure was
+the leading untested theory), while prefetch instead reduces *fill count*
+directly by turning would-be misses into hits before they're needed --
+those savings compound with a bigger cache's higher achievable hit rate
+rather than fighting the same gap. Net effect: prefetch may be what makes
+`--cache-gb` a real lever again, not just a hit-rate number that doesn't
+translate to wall-clock -- worth revisiting that "not a lever here"
+finding at higher budgets now that prefetch is in the loop, as a natural
+follow-up.
+
+**Shipped as the new default** (`expertPrefetchEnabled` defaults to the
+env var being unset or anything but `"0"`, same lifecycle as
+`SWIFTLET_KV_QUANT`/`SWIFTLET_EXPERT_NOCACHE`): a clean, reproducible win
+at every `--cache-gb` tested, byte-identical output confirmed at every
+step, ~80 clean concurrency-stress repeats with zero corruption after the
+counter-race fix. `SWIFTLET_EXPERT_PREFETCH=0` reverts.
+
+**Caveat added after the fact:** the sweep table above ran under
+`F_NOCACHE` on (this session's shipped-at-the-time default) -- see
+"`F_NOCACHE` default reverted" below, added later the same session, which
+found that setting itself costing ~3x decode throughput at `--cache-gb 2`
+on this machine's then-current state and reverted it. Re-verified after
+that revert, `--cache-gb 2` only (see the byte-identical A/B in
+"`F_NOCACHE` default reverted"): prefetch's relative win survives --
++2-3% (11.53 -> 11.76 tok/s) -- but is *smaller* under the fast
+`F_NOCACHE`-off path than the +4.7% recorded in the table above under the
+slow path. The table's absolute tok/s numbers and its `--cache-gb`-6/8
+rows are unverified against the new default; the direction (prefetch
+helps, grows with cache size) is corroborated by a second, independent
+data point (the `--cache-gb 8`, `F_NOCACHE`-off comparison in that same
+section: 9.85 -> 10.87 tok/s, +10.4%) but the exact magnitudes above
+should be treated as measured-under-a-since-reverted-setting, not
+re-confirmed. A proper re-sweep under the corrected default, on a quiet
+machine, is the same open item as the one already noted below for
+`F_NOCACHE` itself -- doing both together would be the efficient next
+session's task rather than two separate sweeps.
+
+Not yet done: a longer-context run (the sweep above used 150 new tokens,
+consistent with most of this document's other short-run comparisons, not
+the 20-25K-token scale the KV-quant long-context sweep used) and a check
+of whether prefetch changes the "`--cache-gb` gap" shape directly (the
+gap-revisited section above found it wasn't driven by KV-cache size;
+whether it's driven by expert-cache fill volume specifically, which
+prefetch directly reduces, is now a more answerable question than before
+but wasn't re-measured this session).

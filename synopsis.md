@@ -458,3 +458,58 @@ doesn't apply either: expert-cache fills already `pread` straight into the
 realign. High effort/risk against a modest (~5-10%) claimed payoff; ranked
 behind ideas #5 and #6. Full writeup: `CONVERSION_PLAN.md` "`research/
 research.txt` idea #2 ... investigated, skipped".
+
+## Router-aware expert prefetch (2026-09-03), now the default
+
+`research/research.txt` idea #3, chosen as the next lever after the
+memory-pressure/KV-quant/`F_NOCACHE` work above. Predicts layer `i+1`'s
+likely experts from layer `i`'s own already-finalized hidden state (via
+`i+1`'s real router weight -- a zero-training, zero-calibration
+heuristic), and prefetches them into `ExpertCache` while `i+1`'s own GPU
+dispatch runs, instead of waiting for `i+1`'s real router output the way
+every fetch did before. Phase 0 (pure measurement, no cache changes)
+validated the predictor against the real model first -- ~79% hit@top-8,
+~94% hit@top-16, far above chance -- before Phase 1 built the riskier
+part: making `ExpertCache` safe for a background `prefetch()` racing the
+real, synchronous `buffers()` (a new lock + per-slot in-flight-fill
+tracking; a real lost-update race in the diagnostic counters, caught by a
+dedicated adversarial stress test, was found and fixed along the way).
+Real fetch/compute is provably untouched by prediction -- prefetch can
+only waste bandwidth, never change output -- verified both by a strict
+byte-identical unit test and a real-model CLI transcript diff.
+
+A/B against the real model (`scratch/expert_prefetch_sweep.sh`, 3 clean
+repeats/cell): **+4.7% at `--cache-gb 2`, +11.9% at `--cache-gb 4`,
++26.0% at `--cache-gb 6`** -- the win grows with cache size rather than
+shrinking, the opposite shape from the earlier-documented "`--cache-gb`
+gap," suggesting this may be what finally makes `--cache-gb` a real lever
+(not yet re-measured at higher budgets to confirm). Shipped as the new
+default; `SWIFTLET_EXPERT_PREFETCH=0` reverts. Full writeup, including the
+counter-race bug and its fix: `CONVERSION_PLAN.md` "Router-aware expert
+prefetch" and its "Phase 1: real prefetch, now the default" subsection.
+That A/B ran under `F_NOCACHE` on, since reverted (see next entry) --
+prefetch's relative win survives the revert (+2-3% re-verified at
+`--cache-gb 2`, +10.4% at `--cache-gb 8`) but the table's exact magnitudes
+predate it; not fully re-swept.
+
+## `F_NOCACHE` default reverted (2026-09-03), same session
+
+Investigating why this session's decode throughput measurements kept
+coming in at roughly a third of this document's own documented numbers
+(~3.6 vs ~11.17 tok/s, same qpack/`--cache-gb 2`) led to isolating the
+cause to one setting: `F_NOCACHE` (shipped default-on earlier this
+session -- see "Expert I/O hint" above), on this machine's current state,
+now costs throughput rather than helping it (**11.53 tok/s off vs 3.63
+tok/s on** at `--cache-gb 2`, byte-identical output either way; also
+worse, not just marginally, at `--cache-gb 8`). Confirmed the regression
+predates and is independent of router-aware expert prefetch by `git
+stash`-ing this session's changes and retesting the exact prior commit
+directly. Root cause of *why* this machine's I/O got more expensive than
+when `F_NOCACHE` was originally measured was not tracked down (a stray
+17-hour orphaned server process was found and killed but didn't
+meaningfully help; an long-running MLX server process with a real ~3.6GB
+resident footprint was noted but not tested in isolation -- pausing other
+processes to test that was correctly blocked by the permission system).
+**Reverted to default off**; `SWIFTLET_EXPERT_NOCACHE=1` opts back in.
+75/75 tests pass. Worth a proper re-sweep on a quiet machine -- full
+detail: `CONVERSION_PLAN.md` "`F_NOCACHE` default reverted".
