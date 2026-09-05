@@ -852,7 +852,7 @@ Verified, in order:
 
 ### Long-context sweep
 
-`ornith-swiftlet-port/design/BENCHMARK_PLAN.md`'s Gate 3 is a cache-
+`design/BENCHMARK_PLAN.md`'s Gate 3 is a cache-
 *budget* sweep, not a context-*length* one -- no pre-existing spec for
 this existed anywhere in the repo despite being referenced repeatedly as
 open. Authored one: `scratch/kv_quant_long_context_sweep.sh`, FP32 vs INT8

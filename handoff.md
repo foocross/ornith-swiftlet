@@ -302,7 +302,7 @@ just without a flag to toggle in one binary.
   from the fill/eviction arc.
 - `CONVERSION_PLAN.md` -- the full numbers/narrative for every step above,
   written as it happened; the primary source, this file is a summary of it.
-- `ornith-swiftlet-port/design/BENCHMARK_PLAN.md` -- the pre-existing Gate
+- `design/BENCHMARK_PLAN.md` -- the pre-existing Gate
   0-5 plan this whole arc followed; Gate 3 (cache-budget sweep across a
   full corpus) and a longer-context sweep are still open per that plan,
   and unaffected by the MoE-fusion work above.

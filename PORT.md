@@ -1,8 +1,10 @@
 # Ornith 1.5 35B on Swiftlet: port kit
 
-This archive is a concrete, reviewable starting point for running
+This is a concrete, reviewable starting point for running
 `ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit` with Swiftlet under a hard memory
-budget.
+budget. (See the top-level [README](README.md) for how this fits into the
+rest of the repo, including the GGUF→MLX conversion pipeline and the
+decode-throughput optimizations layered on top.)
 
 It is deliberately **not** a copied Swiftlet repository. Current Swiftlet
 already implements the Qwen3.5 MoE text graph used by Ornith: nested
@@ -11,7 +13,7 @@ normalized top-k routing, fixed-stride qpack expert blobs, and the Metal
 runtime. The useful port is therefore a small integration overlay plus the
 SlotStream-style memory planner, not a second model implementation.
 
-## What is in the archive
+## What is here
 
 ### 1. A standalone Swift package
 
@@ -77,7 +79,6 @@ estimates.
 ## Run the standalone tests
 
 ```sh
-cd ornith-swiftlet-port
 swift test
 ```
 
@@ -102,7 +103,7 @@ git clone https://github.com/leonickson1/Swiftlet.git
 cd Swiftlet
 swift build -c release
 
-/path/to/ornith-swiftlet-port/swiftlet-overlay/scripts/install.sh "$PWD"
+/path/to/ornith-swiftlet/swiftlet-overlay/scripts/install.sh "$PWD"
 swift test
 ```
 
@@ -112,7 +113,7 @@ kernel, cache, or qpack implementations.
 The equivalent patch is:
 
 ```sh
-git apply /path/to/ornith-swiftlet-port/swiftlet-overlay/patches/0001-ornith-port-overlay.patch
+git apply /path/to/ornith-swiftlet/swiftlet-overlay/patches/0001-ornith-port-overlay.patch
 ```
 
 ## Repack and run the model on Apple Silicon
@@ -162,14 +163,16 @@ pattern, all 40 expert-file manifest entries, and on-disk payload sizes.
 
 ## What this port does not pretend to complete
 
-The archive does not include the 19+ GB checkpoint and did not execute full
-model inference in this environment. Full end-to-end validation requires Apple
-Silicon, Metal, the official MLX checkpoint, and an mlx-lm reference run.
+This does not include the 19+ GB checkpoint and did not execute full model
+inference in the environment it was originally developed in. Full end-to-end
+validation requires Apple Silicon, Metal, the official MLX checkpoint, and an
+mlx-lm reference run — see the top-level [synopsis.md](synopsis.md) and
+[CONVERSION_PLAN.md](CONVERSION_PLAN.md) for that follow-on work.
 
 The overlay source and tests compiled in a Linux smoke harness against the
-reviewed current Swiftlet API surface, but this environment could not run Metal
-or a complete upstream Apple-platform build. It also does
-not yet implement:
+reviewed current Swiftlet API surface, but that environment could not run
+Metal or a complete upstream Apple-platform build. It also does not yet
+implement:
 
 - Ornith's one-layer MTP speculative path;
 - vision input or vision weights;
@@ -201,7 +204,7 @@ reproducible API-surface compile check without Metal, run
 The overlay was designed against Swiftlet `main` as reviewed on 2026-09-02
 (commit `aaa910a`). See `design/UPSTREAM_SNAPSHOT.md` for the exact API
 assumptions.
-Swiftlet and this kit use Apache License 2.0. This archive does not vendor model
+Swiftlet and this kit use Apache License 2.0. This does not vendor model
 weights or upstream Swiftlet source files.
 
 Upstream references:
