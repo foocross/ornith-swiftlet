@@ -18,6 +18,13 @@ scratch/ref/
 scratch/hf-checkpoint/
 scratch/mlx-checkpoint/
 
+# footprint(1) memory-sampling dumps: raw evidence for specific findings in
+# CONVERSION_PLAN.md, not needed to build/run/reproduce anything, and large
+# (multi-MB, mostly-repetitive per-sample JSON) relative to their value once
+# the written conclusion is captured. Regenerate with the corresponding
+# *_sweep.sh script if you need the raw samples again.
+scratch/**/*.footprint.json
+
 # Claude Code local session settings (machine-specific, not shared config)
 .claude/settings.local.json
 
