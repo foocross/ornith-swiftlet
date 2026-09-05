@@ -513,3 +513,19 @@ processes to test that was correctly blocked by the permission system).
 **Reverted to default off**; `SWIFTLET_EXPERT_NOCACHE=1` opts back in.
 75/75 tests pass. Worth a proper re-sweep on a quiet machine -- full
 detail: `CONVERSION_PLAN.md` "`F_NOCACHE` default reverted".
+
+## oMLX server ruled out as the throughput-drop cause (2026-09-04)
+
+The user reported ~14 tok/s previously vs. ~11 tok/s now. The ~14 figure
+traces to the original `F_NOCACHE` sweep above (13.3-13.5 tok/s at
+`--cache-gb 2`); current numbers match the *reverted* default's
+~11.17-11.76 tok/s range documented above -- so the drop is the already-
+known, already-explained `F_NOCACHE` regression-and-revert, not a new
+bug. The one loose thread that section left open -- a long-running `oMLX`
+server process (~3.6GB resident, 12 days uptime) noted but never tested in
+isolation -- was tested directly this session (user killed it): **no
+measurable effect** (10.70 tok/s before, 10.76-10.91 after, 3 repeats).
+Both current defaults (prefetch on, `F_NOCACHE` off) were reconfirmed
+correct on this machine at the same time. Root cause of the machine-wide
+slowdown between the two measurement windows remains open. Full detail:
+`CONVERSION_PLAN.md` "oMLX server ruled out as the I/O-cost cause".

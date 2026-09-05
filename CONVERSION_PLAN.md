@@ -649,7 +649,42 @@ session's numbers -- both directions -- came from a handful of runs under
 conditions that were never fully characterized, not the disciplined sweep
 the original `F_NOCACHE` default was shipped on.
 
-## Base model build: direct, no GGUF conversion needed
+### oMLX server ruled out as the I/O-cost cause (2026-09-04)
+
+The one candidate from the section above left "noted but not tested in
+isolation" -- a long-running `omlx.cli serve` process (`/Applications/oMLX.app`,
+PID 766, up 12 days, `phys_footprint` 3655 MB / peak 6086 MB on this
+18GB-unified-memory machine) -- was still running and got tested directly
+this session, with the user's permission to kill it.
+
+Baseline with it running, current code, defaults (`--cache-gb 2`, prefetch
+on, `F_NOCACHE` off): **10.70 tok/s**. After killing PID 766: **10.91,
+10.76, 10.89 tok/s** (3 repeats) -- indistinguishable from baseline, well
+inside run-to-run noise. The process was not the cause, or at least not a
+cause with any measurable effect at this cache budget on this machine
+today.
+
+While at it, re-confirmed both current defaults are still correct on this
+machine (same qpack/prompt/`--cache-gb 2`, oMLX already dead for all
+three): `SWIFTLET_EXPERT_PREFETCH=0` (prefetch off) gave 10.34, 10.21 --
+worse than default-on, matching the small documented win; forcing
+`SWIFTLET_EXPERT_NOCACHE=1` (the old default) gave 9.53, 9.12 -- clearly
+worse, reconfirming the revert above rather than contradicting it. No
+thermal warning (`pmset -g therm`), on AC power, no critical memory
+pressure (`memory_pressure`), load average ~1.2 -- nothing else obviously
+wrong at the system level either.
+
+**Conclusion**: ~10.7-10.9 tok/s is this machine's honest current decode
+throughput at `--cache-gb 2` with every flag at its (correct) default --
+not a regression fixable by another flag flip. The ~13.3-13.5 tok/s
+measured for the original `F_NOCACHE` sweep above (the likely source of
+this project's occasional "~14 tok/s" figure quoted from memory) came from
+a machine state that has not been reproduced since, on any config tested.
+The oMLX server is ruled out as *the* explanation; the actual cause of
+this machine's throughput drop between the two measurement windows
+remains open -- the "SSD state, or something about this specific
+machine's aging" line above still stands as the least-tested remaining
+candidate.
 
 Everything above is specific to the CRACK build, which started from a GGUF
 that had to be dequantized, re-tensor-named, and requantized through mlx_lm
