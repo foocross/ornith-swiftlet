@@ -1,7 +1,7 @@
 # Third-party notices
 
-This port kit is original integration and reference code released under Apache
-License 2.0. It does not vendor Swiftlet, SlotStream, TurboFieldfare, mlx-lm, or
+This port kit is original integration and reference code, Copyright 2026 Hoa
+Ton-That, released under Apache License 2.0. It does not vendor Swiftlet, SlotStream, TurboFieldfare, mlx-lm, or
 model weights.
 
 The design was informed by:
